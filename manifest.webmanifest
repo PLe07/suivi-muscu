@@ -1,0 +1,17 @@
+{
+  "name": "Suivi muscu Léopold",
+  "short_name": "Suivi muscu",
+  "description": "Programme pecs et bras : séance du jour, chrono, vidéos, pas et progrès.",
+  "lang": "fr",
+  "start_url": "./#aujourdhui",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#EDEFF4",
+  "theme_color": "#2C43CF",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -5,6 +5,8 @@ Sinon, elle propose des démos YouTube à la place.
 
 ## Comment faire
 
+**Une conversation Gemini par vidéo.** Si tu enchaînes plusieurs prompts dans la même conversation, Gemini recopie la vidéo précédente (on a eu des « pompes diamant » et des « archer » qui étaient en fait des pompes pieds surélevés ou des pike push-ups). Vérifie toujours la vidéo avant de l'ajouter.
+
 1. Ouvre Gemini (compte Pro) et choisis la génération de vidéo.
 2. Colle le **style commun**, puis la description de l'exercice.
 3. Regarde la vidéo et vérifie la technique avec les consignes de l'app. Une IA peut se tromper (dos creux, coudes trop écartés…) : si c'est le cas, régénère.

@@ -1,5 +1,5 @@
 /* Service worker : app hors ligne + notifications push */
-const CACHE = "suivi-muscu-v1";
+const CACHE = "suivi-muscu-v2";
 const ASSETS = ["./", "./index.html", "./app.js", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {

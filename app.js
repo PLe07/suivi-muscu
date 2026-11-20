@@ -337,6 +337,8 @@ function metricSeries(m) {
     }
   } else if (m === "poids") {
     tests.concat(bil).forEach(t => { if (isNum(t.poids)) pts.push({ d: t.date, v: t.poids }); });
+  } else if (m === "mmKg") {
+    bil.forEach(t => { if (isNum(t.mmKg)) pts.push({ d: t.date, v: t.mmKg }); });
   } else if (m === "mg") {
     bil.forEach(t => { if (isNum(t.mg)) pts.push({ d: t.date, v: t.mg }); });
   } else if (m === "bras") {
@@ -396,7 +398,7 @@ function updateBar() {
   if (showRun) {
     $runEl.hidden = false;
     $runTime.textContent = fmtClock((Date.now() - run.start) / 1000);
-    $runLbl.textContent = (ACT[run.code] ? ACT[run.code].nom : "Séance") + " en cours";
+    $runLbl.textContent = (ACT[run.code] ? ACT[run.code].nom : "Séance") + " en cours · touche pour reprendre";
   } else $runEl.hidden = true;
   if (showCd) {
     const left = Math.ceil((cd.end - Date.now()) / 1000);
@@ -419,9 +421,373 @@ function updateBar() {
   if (!showRun && !showCd && ticker) { clearInterval(ticker); ticker = null; }
 }
 $cdStop.addEventListener("click", stopCountdown);
+document.getElementById("runbar").addEventListener("click", e => { if (e.target.closest("#cd-stop")) return; if (play) openPlay(play.code, play.date); });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") { if (run) keepAwake(true); if (token()) sync(); }
 });
+
+/* ---------- Mode séance guidé (plein écran) ---------- */
+const LS_PLAY = "suivi.play";
+const $play = document.getElementById("play");
+let play = (function () { try { return JSON.parse(lsGet(LS_PLAY) || "null"); } catch (e) { return null; } })();
+let playTicker = null, playFlash = "";
+function savePlay() { if (play) lsSet(LS_PLAY, JSON.stringify(play)); else lsDel(LS_PLAY); }
+function sessionId(code, date) { return "s-" + date + "-" + code; }
+function sessionPlan(code, date) {
+  const w = weekNum(mondayOf(parseYmd(date)));
+  return EX[code].map((ex, i) => ({ ex: ex, i: i, n: setsFor(code, i, ex, w) }));
+}
+function totalSets(code, date) { return sessionPlan(code, date).reduce((a, x) => a + x.n, 0); }
+function doneSets(code, date) {
+  const doc = D(sessionId(code, date)) || {};
+  return sessionPlan(code, date).reduce((a, x) => a + ((doc.sets && Array.isArray(doc.sets[x.ex.id])) ? doc.sets[x.ex.id].slice(0, x.n).filter(isNum).length : 0), 0);
+}
+function firstOpen(code, date) {
+  const doc = D(sessionId(code, date)) || {};
+  for (const x of sessionPlan(code, date)) {
+    const vals = (doc.sets && doc.sets[x.ex.id]) || [];
+    for (let k = 0; k < x.n; k++) if (!isNum(vals[k])) return { i: x.i, k: k };
+  }
+  return null;
+}
+function bestBefore(exId, date) {
+  let best = null;
+  for (const id in state.docs) {
+    if (id.slice(0, 2) !== "s-") continue;
+    const d = state.docs[id];
+    if (!d || !(d.date < date) || !d.sets || !Array.isArray(d.sets[exId])) continue;
+    d.sets[exId].forEach(v => { if (isNum(v) && (best == null || v > best)) best = v; });
+  }
+  return best;
+}
+function defaultValue(ex, code, date, k) {
+  const doc = D(sessionId(code, date)) || {};
+  const cur = doc.sets && doc.sets[ex.id] && doc.sets[ex.id][k];
+  if (isNum(cur)) return cur;
+  const last = lastFor(code, ex.id, date);
+  if (last && isNum(last.v[k])) return last.v[k];
+  if (last) { const nums = last.v.filter(isNum); if (nums.length) return nums[nums.length - 1]; }
+  if (ex.fin) { const p = metricSeries("pompes"); return p.length ? Math.max(1, p[p.length - 1].v - 1) : 25; }
+  return ex.min;
+}
+function openPlay(code, date) {
+  audio();
+  if (!play || play.code !== code || play.date !== date) {
+    const pos = firstOpen(code, date);
+    play = { code: code, date: date, i: pos ? pos.i : 0, k: pos ? pos.k : 0, phase: pos ? ((code !== "G" && pos.i === 0 && pos.k === 0) ? "warm" : "set") : "done", warm: {}, val: null, end: 0, total: 0 };
+    if (!run || run.code !== code || run.date !== date) { run = { code: code, date: date, start: Date.now() }; lsSet(LS_RUN, JSON.stringify(run)); }
+  }
+  play.open = true; savePlay();
+  keepAwake(true); startTicker(); renderPlay(); startPlayTicker();
+}
+function closePlay() { if (play) { play.open = false; savePlay(); } $play.hidden = true; document.body.style.overflow = ""; stopPlayTicker(); render(); }
+function startPlayTicker() { if (!playTicker) playTicker = setInterval(tickPlay, 250); }
+function stopPlayTicker() { clearInterval(playTicker); playTicker = null; }
+function ringSvg(frac, big, small) {
+  const C = 2 * Math.PI * 92;
+  return '<svg class="ring" viewBox="0 0 220 220" aria-hidden="true"><circle cx="110" cy="110" r="92" class="ring-bg"/><circle id="ring-fg" cx="110" cy="110" r="92" class="ring-fg" style="stroke-dasharray:' + C.toFixed(1) + ";stroke-dashoffset:" + (C * (1 - Math.max(0, Math.min(1, frac)))).toFixed(1) + '"/></svg><div class="ring-txt"><b id="ring-big">' + big + '</b><span>' + small + "</span></div>";
+}
+function nextLabel(code, date, i, k) {
+  const plan = sessionPlan(code, date);
+  if (k + 1 < plan[i].n) return plan[i].ex.nom + " · série " + (k + 2) + "/" + plan[i].n;
+  if (i + 1 < plan.length) return plan[i + 1].ex.nom + " · série 1/" + plan[i + 1].n;
+  return "Fin de la séance";
+}
+function playVideo(ex) {
+  return '<div class="pvid" data-yt="' + esc(ex.yt) + '"><video src="videos/' + esc(ex.v) + '.mp4" playsinline muted loop autoplay preload="auto"></video></div>';
+}
+function renderPlay() {
+  if (!play || !play.open) { $play.hidden = true; return; }
+  const code = play.code, date = play.date, a = ACT[code];
+  const plan = sessionPlan(code, date);
+  const tot = totalSets(code, date), dn = doneSets(code, date);
+  let h = '<div class="p-top"><button type="button" class="p-x" data-p="close" aria-label="Mettre en pause et fermer">✕</button>' +
+    '<div class="p-title"><b>' + esc(a.nom) + " · " + esc(a.sous) + '</b><span id="p-elapsed">' + (run ? fmtClock((Date.now() - run.start) / 1000) : "0:00") + "</span></div>" +
+    '<span class="p-count">' + dn + "/" + tot + '</span></div><div class="p-prog"><i style="width:' + (tot ? Math.round(dn / tot * 100) : 0) + '%"></i></div>';
+  h += '<div class="p-body">';
+  if (play.phase === "warm") {
+    const n = ECHAUFF.filter((x, j) => play.warm[j]).length;
+    h += '<p class="p-kicker">Échauffement · 5 min</p><h2 class="p-h">On chauffe les épaules et les coudes</h2><div class="p-warm">' +
+      ECHAUFF.map((x, j) => '<button type="button" class="p-wi' + (play.warm[j] ? " on" : "") + '" data-p="warm" data-j="' + j + '"><span class="p-chk">' + (play.warm[j] ? "✓" : "") + "</span>" + esc(x) + "</button>").join("") + "</div>" +
+      '<div class="p-actions"><button type="button" class="btn big" data-p="startsets">' + (n === ECHAUFF.length ? "C'est parti" : "Passer à la séance") + "</button></div>";
+  } else if (play.phase === "set" || play.phase === "hold") {
+    const x = plan[play.i], ex = x.ex;
+    if (play.val == null) play.val = defaultValue(ex, code, date, play.k);
+    const last = lastFor(code, ex.id, date);
+    const best = bestBefore(ex.id, date);
+    h += playVideo(ex);
+    h += '<p class="p-kicker">Exercice ' + (play.i + 1) + "/" + plan.length + " · Série " + (play.k + 1) + "/" + x.n + "</p>" +
+      '<h2 class="p-h">' + esc(ex.nom) + (ex.detail ? ' <span class="p-det">· ' + esc(ex.detail) + "</span>" : "") + "</h2>" +
+      '<p class="p-target">Objectif : ' + esc(target(ex, x.n)) + (best != null ? ' · record <b>' + best + "</b>" : "") + "</p>" +
+      '<p class="p-cue">' + esc(ex.c) + "</p>";
+    if (play.phase === "hold") {
+      const left = Math.max(0, (play.end - Date.now()) / 1000);
+      h += '<div class="p-ring hold">' + ringSvg(left / play.total, Math.ceil(left), "secondes") + '</div><div class="p-actions"><button type="button" class="btn big ghost" data-p="holdstop">J\'arrête là</button></div>';
+    } else {
+      h += '<div class="stepper"><button type="button" data-p="dec" aria-label="Moins">−</button><output id="p-val">' + play.val + '</output><button type="button" data-p="inc" aria-label="Plus">+</button></div>' +
+        '<p class="p-unit">' + esc(ex.u) + (last && isNum(last.v[play.k]) ? " · la dernière fois : " + last.v[play.k] : "") + "</p>";
+      if (playFlash) h += '<p class="p-flash">' + esc(playFlash) + "</p>";
+      h += '<div class="p-actions">' + (isTimed(ex) ? '<button type="button" class="btn big ghost" data-p="hold">Lancer le chrono ' + ex.min + " s</button>" : "") +
+        '<button type="button" class="btn big good" data-p="validate">Valider la série</button></div>' +
+        '<div class="p-mini"><button type="button" data-p="prev">‹ Série précédente</button><button type="button" data-p="skipex">Passer l\'exercice ›</button></div>';
+    }
+  } else if (play.phase === "rest") {
+    const left = Math.max(0, (play.end - Date.now()) / 1000);
+    h += '<p class="p-kicker">Repos</p><div class="p-ring">' + ringSvg(left / play.total, fmtClock(Math.ceil(left)), "respire") + "</div>" +
+      (playFlash ? '<p class="p-flash">' + esc(playFlash) + "</p>" : "") +
+      '<p class="p-next">Ensuite : <b>' + esc(plan[play.i].ex.nom + " · série " + (play.k + 1) + "/" + plan[play.i].n) + "</b></p>" +
+      '<div class="p-actions"><button type="button" class="btn big ghost" data-p="plus15">+15 s</button><button type="button" class="btn big" data-p="skiprest">Passer le repos</button></div>';
+  } else {
+    const doc = D(sessionId(code, date)) || {};
+    let reps = 0, sets = 0;
+    plan.forEach(x => { const v = (doc.sets && doc.sets[x.ex.id]) || []; v.slice(0, x.n).forEach(n => { if (isNum(n)) { sets++; if (!isTimed(x.ex)) reps += n * (x.ex.u.indexOf("côté") >= 0 ? 2 : 1); } }); });
+    const prs = (doc.prs || []).map(id => (plan.find(x => x.ex.id === id) || {}).ex).filter(Boolean);
+    const mins = run ? Math.max(1, Math.round((Date.now() - run.start) / 60000)) : (doc.duree || 0);
+    h += '<p class="p-kicker">Séance terminée</p><h2 class="p-h">Bien joué, Léopold.</h2>' +
+      '<div class="p-sum"><div><b>' + mins + "</b><span>minutes</span></div><div><b>" + sets + "</b><span>séries</span></div><div><b>" + reps + "</b><span>répétitions</span></div></div>" +
+      (prs.length ? '<div class="p-prs"><b>Records battus</b>' + prs.map(e => "<span>🏆 " + esc(e.nom) + "</span>").join("") + "</div>" : "") +
+      '<p class="p-cue">Note ton ressenti si tu veux, puis valide : la séance compte pour ta semaine.</p>' +
+      '<label class="f" for="p-note">Note (poids du sac, douleur, sensation…)<textarea id="p-note" data-p-note="1">' + esc(doc.note || "") + "</textarea></label>" +
+      '<div class="p-actions"><button type="button" class="btn big good" data-p="finish">Terminer la séance</button></div>' +
+      '<div class="p-mini"><button type="button" data-p="prev">‹ Revenir à la dernière série</button></div>';
+  }
+  h += "</div>";
+  $play.innerHTML = h;
+  $play.hidden = false;
+  document.body.style.overflow = "hidden";
+  const v = $play.querySelector("video");
+  if (v) { v.addEventListener("error", () => { const box = v.closest(".pvid"); if (box) box.innerHTML = '<a class="pvid-yt" href="' + ytLink(box.dataset.yt || "") + '" target="_blank" rel="noopener">▶ Voir la technique sur YouTube</a>'; }); try { v.play(); } catch (e) {} }
+}
+function tickPlay() {
+  if (!play || !play.open) return;
+  const el = document.getElementById("p-elapsed");
+  if (el && run) el.textContent = fmtClock((Date.now() - run.start) / 1000);
+  if (play.phase !== "rest" && play.phase !== "hold") return;
+  const left = (play.end - Date.now()) / 1000;
+  const fg = document.getElementById("ring-fg"), big = document.getElementById("ring-big");
+  const C = 2 * Math.PI * 92;
+  if (fg) fg.style.strokeDashoffset = (C * (1 - Math.max(0, left) / play.total)).toFixed(1);
+  if (big) big.textContent = play.phase === "rest" ? fmtClock(Math.max(0, Math.ceil(left))) : Math.max(0, Math.ceil(left));
+  const s = Math.ceil(left);
+  if (s <= 3 && s > 0 && s !== play.lastBeep) { play.lastBeep = s; beep(660, 0.12); }
+  if (left <= 0) {
+    beep(990, 0.6);
+    try { if (navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch (e) {}
+    if (play.phase === "hold") { play.val = play.total; playFlash = "Tenu " + play.total + " s. Valide la série."; }
+    else playFlash = "";
+    play.phase = "set"; play.lastBeep = null; savePlay(); renderPlay();
+  }
+}
+function advance() {
+  const plan = sessionPlan(play.code, play.date);
+  let i = play.i, k = play.k + 1;
+  if (k >= plan[i].n) { i++; k = 0; }
+  const restSec = plan[play.i].ex.repos;
+  if (i >= plan.length) { play.phase = "done"; play.i = plan.length - 1; play.k = plan[plan.length - 1].n - 1; }
+  else {
+    play.i = i; play.k = k; play.val = null;
+    if (restSec > 0) { play.phase = "rest"; play.total = restSec; play.end = Date.now() + restSec * 1000; play.lastBeep = null; }
+    else play.phase = "set";
+  }
+  savePlay();
+}
+function validateSet() {
+  const plan = sessionPlan(play.code, play.date), x = plan[play.i];
+  const id = sessionId(play.code, play.date);
+  const doc = clone(D(id));
+  doc.date = play.date; doc.code = play.code; doc.sets = doc.sets || {};
+  const arr = Array.isArray(doc.sets[x.ex.id]) ? doc.sets[x.ex.id] : [];
+  for (let k = 0; k < x.n; k++) if (!isNum(arr[k])) arr[k] = null;
+  arr[play.k] = play.val;
+  doc.sets[x.ex.id] = arr;
+  const best = bestBefore(x.ex.id, play.date);
+  playFlash = "";
+  if (best != null && play.val > best) {
+    doc.prs = Array.isArray(doc.prs) ? doc.prs : [];
+    if (doc.prs.indexOf(x.ex.id) < 0) doc.prs.push(x.ex.id);
+    playFlash = x.ex.fin ? "🏆 Record de pompes d'affilée : " + (play.val + 1) + " (avant : " + (best + 1) + ")" : "🏆 Nouveau record sur " + x.ex.nom + " : " + play.val + " (avant : " + best + ")";
+    beep(1320, 0.25);
+  }
+  write(id, doc);
+  advance();
+  renderPlay();
+}
+function finishSession() {
+  const code = play.code, date = play.date;
+  const id = sessionId(code, date);
+  const doc = clone(D(id));
+  doc.date = date; doc.code = code;
+  const noteEl = document.getElementById("p-note");
+  if (noteEl) doc.note = noteEl.value;
+  if (run) doc.duree = Math.max(1, Math.round((Date.now() - run.start) / 60000));
+  write(id, doc);
+  const jid = "j-" + date, j = clone(D(jid)); j.fait = j.fait || {}; j.fait[code] = true; write(jid, j);
+  play = null; savePlay(); stopRun(); stopPlayTicker();
+  $play.hidden = true; document.body.style.overflow = "";
+  confetti();
+  render();
+}
+function confetti() {
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const box = document.createElement("div");
+  box.className = "confetti";
+  const colors = ["#2C43CF", "#1B7C47", "#F0AE4C", "#E2523F", "#8090FF"];
+  for (let n = 0; n < 60; n++) {
+    const s = document.createElement("i");
+    s.style.left = Math.random() * 100 + "vw";
+    s.style.background = colors[n % colors.length];
+    s.style.animationDelay = (Math.random() * 0.6).toFixed(2) + "s";
+    s.style.transform = "rotate(" + Math.round(Math.random() * 360) + "deg)";
+    box.appendChild(s);
+  }
+  document.body.appendChild(box);
+  setTimeout(() => box.remove(), 3500);
+}
+$play.addEventListener("click", e => {
+  const b = e.target.closest("[data-p]");
+  if (!b || !play) return;
+  audio();
+  const act = b.dataset.p;
+  const plan = sessionPlan(play.code, play.date);
+  if (act === "close") { closePlay(); return; }
+  if (act === "warm") { const j = Number(b.dataset.j); play.warm[j] = !play.warm[j]; savePlay(); renderPlay(); return; }
+  if (act === "startsets") { play.phase = "set"; play.val = null; savePlay(); renderPlay(); return; }
+  if (act === "inc" || act === "dec") {
+    const ex = plan[play.i].ex, step = isTimed(ex) ? 5 : 1;
+    play.val = Math.max(0, (play.val || 0) + (act === "inc" ? step : -step));
+    const o = document.getElementById("p-val"); if (o) o.textContent = play.val;
+    savePlay(); return;
+  }
+  if (act === "validate") { validateSet(); return; }
+  if (act === "hold") { const ex = plan[play.i].ex; play.phase = "hold"; play.total = ex.min; play.end = Date.now() + ex.min * 1000; play.holdStart = Date.now(); play.lastBeep = null; playFlash = ""; savePlay(); renderPlay(); return; }
+  if (act === "holdstop") { play.val = Math.max(1, Math.round((Date.now() - play.holdStart) / 1000)); play.phase = "set"; playFlash = "Tenu " + play.val + " s."; savePlay(); renderPlay(); return; }
+  if (act === "skiprest") { play.phase = "set"; playFlash = ""; savePlay(); renderPlay(); return; }
+  if (act === "plus15") { play.end += 15000; play.total += 15; savePlay(); tickPlay(); return; }
+  if (act === "prev") {
+    if (play.phase === "done") { play.phase = "set"; }
+    else if (play.k > 0) play.k--;
+    else if (play.i > 0) { play.i--; play.k = plan[play.i].n - 1; }
+    play.val = null; play.phase = "set"; playFlash = ""; savePlay(); renderPlay(); return;
+  }
+  if (act === "skipex") {
+    if (play.i + 1 < plan.length) { play.i++; play.k = 0; play.phase = "set"; }
+    else play.phase = "done";
+    play.val = null; playFlash = ""; savePlay(); renderPlay(); return;
+  }
+  if (act === "finish") { finishSession(); return; }
+});
+$play.addEventListener("input", e => {
+  if (!play || !e.target.dataset.pNote) return;
+  const id = sessionId(play.code, play.date), doc = clone(D(id));
+  doc.date = play.date; doc.code = play.code; doc.note = e.target.value; write(id, doc);
+});
+
+/* ---------- Série, records, badges ---------- */
+function dayStatus(k) {
+  const d = parseYmd(k), mon = mondayOf(d), plan = planFor(ymd(mon))[dayIdx(d)];
+  const j = D("j-" + k) || {}, fait = j.fait || {};
+  const muscu = plan.filter(c => ACT[c].type === "muscu");
+  const doneAny = Object.keys(fait).some(c => fait[c] && ACT[c]);
+  const doneMuscu = Object.keys(fait).filter(c => fait[c] && ACT[c] && ACT[c].type === "muscu").length;
+  return { planned: plan, muscu: muscu, doneAny: doneAny, doneMuscu: doneMuscu, ok: muscu.length ? doneMuscu >= muscu.length : true };
+}
+function streak() {
+  let n = 0;
+  const today = new Date();
+  const st0 = dayStatus(ymd(today));
+  let d = st0.doneAny ? today : addDays(today, -1);
+  for (let guard = 0; guard < 400; guard++) {
+    const k = ymd(d);
+    if (k < "2026-11-16") break;
+    const st = dayStatus(k);
+    if (!st.ok) break;
+    if (st.doneAny) n++;
+    d = addDays(d, -1);
+  }
+  return n;
+}
+function allSessions() { return Object.keys(state.docs).filter(id => id.slice(0, 2) === "s-").map(id => state.docs[id]).filter(Boolean); }
+function musclDoneCount() { let n = 0; for (const id in state.docs) if (id.slice(0, 2) === "j-") { const f = (state.docs[id] || {}).fait || {}; for (const c in f) if (f[c] && ACT[c] && ACT[c].type === "muscu") n++; } return n; }
+function records() {
+  const out = [];
+  ["A", "B", "C", "G"].forEach(code => EX[code].forEach(ex => {
+    if (out.find(r => r.nom === ex.nom && r.u === ex.u)) return;
+    let best = null, date = null;
+    allSessions().forEach(s => { const v = s.sets && s.sets[ex.id]; if (Array.isArray(v)) v.forEach(n => { if (isNum(n) && (best == null || n > best)) { best = ex.fin ? n + 1 : n; date = s.date; } }); });
+    if (best != null) out.push({ nom: ex.fin ? "Pompes d'affilée" : ex.nom, u: ex.fin ? "rép." : ex.u, best: best, date: date });
+  }));
+  return out;
+}
+const PUSH_IDS = { a1: 1, a2: 1, a4: 1, a5: 1, a6: 1, c1: 2, c2: 1 };
+function pushupTotal() { let t = 0; allSessions().forEach(s => { for (const id in PUSH_IDS) { const v = s.sets && s.sets[id]; if (Array.isArray(v)) v.forEach(n => { if (isNum(n)) t += n * PUSH_IDS[id]; }); } }); return t; }
+function stepDays() { let n = 0; Object.keys(state.pas || {}).forEach(k => { const p = pasFor(k); if (p && p.v >= STEP_GOAL) n++; }); for (const id in state.docs) if (id.slice(0, 2) === "j-" && !(state.pas || {})[id.slice(2)]) { const j = state.docs[id]; if (j && isNum(j.pas) && j.pas >= STEP_GOAL) n++; } return n; }
+function perfectWeeks() {
+  let n = 0;
+  const cur = weekNum(mondayOf(new Date()));
+  for (let w = 1; w < Math.min(cur, 13); w++) { const mon = addDays(START, (w - 1) * 7), st = weekStats(mon, planFor(ymd(mon)), null); if (st.pm && st.dm >= st.pm) n++; }
+  return n;
+}
+function badges() {
+  const m = musclDoneCount(), pr = allSessions().some(s => Array.isArray(s.prs) && s.prs.length), pt = pushupTotal(), sd = stepDays(), pw = perfectWeeks(), stk = streak();
+  const parc = (() => { let n = 0; for (const id in state.docs) if (id.slice(0, 2) === "j-") { const f = (state.docs[id] || {}).fait || {}; if (f.B) n++; } return n; })();
+  return [
+    { ic: "🎯", nom: "Première séance", ok: m >= 1, info: m >= 1 ? "Débloqué" : "Termine ta première séance" },
+    { ic: "🔥", nom: "Série de 7 jours", ok: stk >= 7, info: Math.min(stk, 7) + "/7 jours" },
+    { ic: "📅", nom: "Semaine parfaite", ok: pw >= 1, info: pw >= 1 ? pw + " semaine" + (pw > 1 ? "s" : "") : "Toutes les séances d'une semaine" },
+    { ic: "💪", nom: "10 séances", ok: m >= 10, info: Math.min(m, 10) + "/10" },
+    { ic: "🏋️", nom: "25 séances", ok: m >= 25, info: Math.min(m, 25) + "/25" },
+    { ic: "🏆", nom: "Premier record", ok: pr, info: pr ? "Débloqué" : "Bats un record en séance" },
+    { ic: "🫸", nom: "1 000 pompes", ok: pt >= 1000, info: Math.min(pt, 1000) + "/1 000" },
+    { ic: "🚶", nom: "7 jours à 8 000 pas", ok: sd >= 7, info: Math.min(sd, 7) + "/7 jours" },
+    { ic: "🌅", nom: "5 séances au parc", ok: parc >= 5, info: Math.min(parc, 5) + "/5" }
+  ];
+}
+function heatmap() {
+  let h = '<div class="heat" role="img" aria-label="Calendrier des séances, semaine 0 à 12"><div class="heat-h"><span></span>' + JOURS_C.map(d => "<span>" + d.charAt(0) + "</span>").join("") + "</div>";
+  const tk = todayKey();
+  for (let w = 0; w <= 12; w++) {
+    const mon = addDays(START, (w - 1) * 7);
+    h += '<div class="heat-r"><span class="heat-w">S' + w + "</span>";
+    for (let i = 0; i < 7; i++) {
+      const k = ymd(addDays(mon, i)), st = dayStatus(k);
+      let cls = "rest";
+      if (k > tk) cls = st.muscu.length ? "todo" : "rest";
+      else if (st.doneMuscu) cls = "done";
+      else if (st.doneAny) cls = "cardio";
+      else if (st.muscu.length && k < tk) cls = "miss";
+      else if (st.muscu.length) cls = "todo";
+      h += '<span class="hc ' + cls + (k === tk ? " now" : "") + '" title="' + fdate(k) + '"></span>';
+    }
+    h += "</div>";
+  }
+  return h + '</div><div class="heat-leg"><span><i class="hc done"></i>muscu faite</span><span><i class="hc cardio"></i>cardio</span><span><i class="hc miss"></i>ratée</span><span><i class="hc todo"></i>prévue</span></div>';
+}
+function weekVolume() {
+  const out = [];
+  const cur = Math.max(1, Math.min(12, weekNum(mondayOf(new Date()))));
+  for (let w = Math.max(0, cur - 7); w <= cur; w++) {
+    const mon = addDays(START, (w - 1) * 7), a = ymd(mon), b = ymd(addDays(mon, 6));
+    let reps = 0;
+    allSessions().forEach(s => { if (s.date >= a && s.date <= b && s.sets) ["A", "B", "C"].forEach(code => { if (s.code !== code) return; EX[code].forEach(ex => { if (isTimed(ex)) return; const v = s.sets[ex.id]; if (Array.isArray(v)) v.forEach(n => { if (isNum(n)) reps += n * (ex.u.indexOf("côté") >= 0 ? 2 : 1); }); }); }); });
+    out.push({ w: w, reps: reps });
+  }
+  return out;
+}
+function volumeBars(data) {
+  const max = Math.max(1, ...data.map(d => d.reps));
+  if (!data.some(d => d.reps)) return '<p class="muted small">Le volume apparaîtra après ta première séance validée.</p>';
+  return '<div class="vbars">' + data.map(d => '<div class="vb"><span class="vb-n">' + (d.reps || "") + '</span><i style="height:' + Math.max(2, Math.round(d.reps / max * 100)) + '%"></i><span class="vb-l">S' + d.w + "</span></div>").join("") + "</div>";
+}
+const MOTIV = [
+  "40 minutes de séance, c'est moins qu'un scroll TikTok qui part en vrille.",
+  "Pose Insta, prends le tapis : les pecs ne se dessinent pas en regardant ceux des autres.",
+  "Le meilleur moment pour faire ta séance, c'est avant d'ouvrir une appli.",
+  "Une séance ratée, on la décale. Deux d'affilée, jamais.",
+  "Chaque série validée compte. Même les mauvais jours.",
+  "Tu ne te souviendras d'aucune vidéo de ce soir. De ta séance, si.",
+  "Mets ton téléphone en mode avion pendant la séance : le chrono marche quand même.",
+  "Petit rappel : 61 kg aujourd'hui, l'objectif c'est de prendre du muscle, pas d'en perdre."
+];
 
 /* ---------- Rendu ---------- */
 const $app = document.getElementById("app");
@@ -472,8 +838,8 @@ function sessionBody(code, t) {
   const doc = D("s-" + t + "-" + code) || {};
   const running = run && run.code === code && run.date === t;
   let h = "";
-  if (!running) h += '<button type="button" class="btn" data-act="start" data-code="' + code + '" data-date="' + t + '">Démarrer la séance</button>';
-  else h += '<p class="tip">Séance en cours : le chrono tourne en bas de l\'écran et l\'écran reste allumé.</p>';
+  void running;
+  h += '<p class="small muted">Saisie manuelle : tu peux corriger ou compléter tes séries ici. Pour t\'entraîner, utilise plutôt « Commencer la séance ».</p>';
   if (code !== "G") h += '<details class="warm mt"><summary>Échauffement · 5 min</summary><ul>' + ECHAUFF.map(x => "<li>" + esc(x) + "</li>").join("") + "</ul></details>";
   if (code !== "G") h += '<p class="tip mt">' + esc(phase(w).tip) + "</p>";
   h += '<div class="mt">';
@@ -535,21 +901,80 @@ function stepsCard(t) {
   h += '<details class="warm mt"><summary>Saisir à la main</summary><label class="f mt" for="pas-' + t + '" style="max-width:200px">Nombre de pas<input id="pas-' + t + '" type="number" inputmode="numeric" min="0" step="100" value="' + (isNum(j.pas) ? j.pas : "") + '" data-act="pas" data-date="' + t + '"></label></details>';
   return h + "</div>";
 }
+function weekStrip(mon, plan, tk) {
+  let h = '<a class="wstrip" href="#semaine" aria-label="Voir la semaine">';
+  const dm = doneMap(mon, plan);
+  for (let i = 0; i < 7; i++) {
+    const k = ymd(addDays(mon, i));
+    const mus = plan[i].filter(c => ACT[c].type === "muscu");
+    const allDone = plan[i].length && dm[i].every(Boolean);
+    const someDone = dm[i].some(Boolean);
+    let cls = plan[i].length ? (mus.length ? "plan" : "cardio") : "rest";
+    if (allDone) cls = "done"; else if (someDone) cls += " part"; else if (k < tk && mus.length) cls = "miss";
+    const lab = mus.length ? mus.map(c => c === "G" ? "G" : c).join("") : (plan[i].length ? "·" : "");
+    h += '<span class="wd ' + cls + (k === tk ? " now" : "") + '"><small>' + JOURS_C[i].charAt(0) + "</small><b>" + (allDone ? "✓" : lab) + "</b></span>";
+  }
+  return h + "</a>";
+}
+function sessionStats(code, date) {
+  const doc = D(sessionId(code, date)) || {};
+  let reps = 0, sets = 0;
+  sessionPlan(code, date).forEach(x => { const v = (doc.sets && doc.sets[x.ex.id]) || []; v.slice(0, x.n).forEach(n => { if (isNum(n)) { sets++; if (!isTimed(x.ex)) reps += n * (x.ex.u.indexOf("côté") >= 0 ? 2 : 1); } }); });
+  return { reps: reps, sets: sets, duree: doc.duree, prs: (doc.prs || []).length };
+}
+function heroCard(code, t, j, isExtra) {
+  const a = ACT[code];
+  const done = !!(j.fait && j.fait[code]);
+  const plan = sessionPlan(code, t);
+  const tot = totalSets(code, t), dn = doneSets(code, t);
+  const key = t + code;
+  const open = !!S.open[key];
+  let h = '<div class="card hero ' + (done ? "isdone" : "") + '">';
+  if (done) {
+    const st = sessionStats(code, t);
+    h += '<p class="kicker good">✓ Séance faite</p><h3>' + esc(a.nom) + ' <span class="sous">· ' + esc(a.sous) + "</span></h3>" +
+      '<div class="mini-stats"><span><b>' + (st.duree || "—") + "</b> min</span><span><b>" + st.sets + "</b> séries</span><span><b>" + st.reps + "</b> rép.</span>" + (st.prs ? "<span><b>🏆 " + st.prs + "</b> record" + (st.prs > 1 ? "s" : "") + "</span>" : "") + "</div>";
+  } else {
+    const kick = code === "B" ? "Au parc" : (new Date().getHours() < 14 ? "Aujourd'hui" : "Ce soir");
+    h += '<p class="kicker">' + kick + (isExtra ? " · en plus" : "") + "</p><h3 class=\"hero-t\">" + esc(a.nom) + ' <span class="sous">· ' + esc(a.sous) + "</span></h3>" +
+      '<p class="small muted">' + esc(a.lieu) + " · " + esc(a.duree) + " · " + plan.length + " exercices · " + tot + " séries</p>" +
+      '<div class="ex-chips">' + plan.map(x => "<span>" + esc(x.ex.nom) + "</span>").join("") + "</div>";
+    if (dn) h += '<div class="bar mt"><i style="width:' + Math.round(dn / tot * 100) + '%"></i></div><p class="small muted">' + dn + "/" + tot + " séries déjà faites</p>";
+    h += '<button type="button" class="btn big mt" data-act="play" data-code="' + code + '" data-date="' + t + '">' + (dn || (play && play.code === code && play.date === t) ? "▶ Reprendre la séance" : "▶ Commencer la séance") + "</button>";
+  }
+  h += '<div class="row mt">';
+  h += '<button type="button" class="btn sm ghost" data-act="open" data-key="' + key + '" data-def="0">' + (open ? "Masquer le détail" : "Détail et saisie manuelle") + "</button>";
+  h += '<button type="button" class="btn sm quiet" data-act="done" data-code="' + code + '" data-date="' + t + '">' + (done ? "Annuler « fait »" : "Marquer comme faite") + "</button>";
+  if (isExtra && !done) h += '<button type="button" class="btn sm quiet" data-act="unextra" data-code="' + code + '" data-date="' + t + '">Retirer</button>';
+  h += "</div>";
+  if (open) h += '<div class="mt">' + sessionBody(code, t) + "</div>";
+  return h + "</div>";
+}
 function vToday() {
   const now = new Date(), t = ymd(now), mon = mondayOf(now), di = dayIdx(now), w = weekNum(mon);
   const plan = planFor(ymd(mon));
   const j = D("j-" + t) || {};
   const planned = plan[di];
   const extra = (Array.isArray(j.extra) ? j.extra : []).filter(c => ACT[c] && planned.indexOf(c) < 0);
-  let h = '<p class="date">' + JOURS[di] + " " + now.getDate() + " " + MOIS[now.getMonth()] + '</p><div class="stack">';
-  h += installCard();
-  if (!planned.length && !extra.length) h += '<div class="card"><h3>Repos</h3><p class="muted mt">Rien de prévu aujourd\'hui. Marche quand même : objectif 8 000 pas.</p></div>';
-  planned.forEach(c => { h += actCard(c, t, j, false); });
-  extra.forEach(c => { h += actCard(c, t, j, true); });
+  const list = planned.concat(extra);
+  const stk = streak();
+  const motiv = MOTIV[(now.getDate() + now.getMonth() * 3) % MOTIV.length];
+  let h = '<div class="hello"><div><p class="date">' + JOURS[di] + " " + now.getDate() + " " + MOIS[now.getMonth()] + '</p><p class="motiv">' + esc(motiv) + "</p></div>" +
+    '<div class="streak' + (stk ? "" : " zero") + '" title="Jours d\'affilée sans séance ratée"><b>🔥 ' + stk + "</b><span>jour" + (stk > 1 ? "s" : "") + "</span></div></div>";
+  h += weekStrip(mon, plan, t);
+  h += '<div class="stack mt">' + installCard();
+  if (play && !play.open && (play.date !== t || list.indexOf(play.code) < 0)) {
+    h += '<div class="card hero"><p class="kicker">Séance en pause</p><h3>' + esc(ACT[play.code].nom) + ' <span class="sous">· ' + fdate(play.date) + '</span></h3><button type="button" class="btn big mt" data-act="play" data-code="' + play.code + '" data-date="' + play.date + '">▶ Reprendre</button></div>';
+  }
+  list.filter(c => ACT[c].type === "muscu").forEach(c => { h += heroCard(c, t, j, extra.indexOf(c) >= 0); });
+  list.filter(c => ACT[c].type === "cardio").forEach(c => { h += actCard(c, t, j, extra.indexOf(c) >= 0); });
+  if (!list.length) h += '<div class="card"><p class="kicker">Repos</p><h3>Récupère, mais bouge</h3><p class="muted mt">Pas de séance aujourd\'hui. Vise quand même 8 000 pas : une marche de 30 minutes suffit souvent.</p></div>';
   if (w <= 0) h += todoCard();
   h += stepsCard(t);
-  const others = ORDER.filter(c => planned.indexOf(c) < 0 && extra.indexOf(c) < 0);
-  if (others.length) h += '<div class="card"><h3>Faire autre chose aujourd\'hui</h3><p class="small muted">Séance ratée hier ? Rattrape-la ici, elle compte pour la semaine.</p><div class="row mt">' + others.map(c => '<button type="button" class="chip' + (ACT[c].push ? " push" : "") + '" data-act="extra" data-code="' + c + '" data-date="' + t + '">+ ' + esc(SHORT[c]) + "</button>").join("") + "</div></div>";
+  const next = BILAN_DATES.find(d => d >= t);
+  if (next) { const dd = daysBetween(t, next); h += '<div class="card slim"><span>📊 Prochain bilan Biody</span><b>' + (dd === 0 ? "aujourd'hui" : dd === 1 ? "demain" : "dans " + dd + " jours") + "</b></div>"; }
+  const others = ORDER.filter(c => list.indexOf(c) < 0);
+  if (others.length) h += '<details class="card"><summary><b>Faire autre chose aujourd\'hui</b> <span class="small muted">· rattraper une séance</span></summary><div class="row mt">' + others.map(c => '<button type="button" class="chip' + (ACT[c].push ? " push" : "") + '" data-act="extra" data-code="' + c + '" data-date="' + t + '">+ ' + esc(SHORT[c]) + "</button>").join("") + "</div></details>";
   if (di === 6) h += '<div class="card main"><h3>C\'est dimanche : bilan de la semaine</h3><p class="mt">Sommeil, ressenti, note : 1 minute dans <a href="#semaine">Semaine</a>. Je m\'en sers pour ajuster ton programme.</p></div>';
   return h + "</div>";
 }
@@ -721,6 +1146,8 @@ function vProgress() {
   const tr0 = first("tractions"), br0 = first("bras"), po0 = first("poitrine");
   const bil = items("bilans").sort(byDate);
   const b0 = bil[0], bl = bil[bil.length - 1];
+  h += '<h2>Ton calendrier</h2><div class="card">' + heatmap() + '</div>';
+  h += '<div class="card mt row" style="justify-content:space-between"><label class="f" for="quick-w" style="flex:1;min-width:150px">Pesée du jour (kg, le matin à jeun)<input id="quick-w" type="number" inputmode="decimal" step="0.1" min="30" max="200" placeholder="61,0"></label><button type="button" class="btn" data-act="weigh">Enregistrer</button>' + (S.formMsg.weigh ? '<span class="small" style="color:var(--crit)">' + esc(S.formMsg.weigh) + '</span>' : '') + '</div>';
   h += '<h2>Objectifs au 15 février</h2><div class="card scroll"><table class="tbl"><thead><tr><th>Objectif</th><th>Départ</th><th>Actuel</th><th>Cible</th><th>Avancée</th></tr></thead><tbody>' +
     objRow("Pompes d'affilée", p0, pc, 45, "") +
     objRow("Pompes archer (par côté)", first("archer"), last("archer"), 8, "") +
@@ -728,18 +1155,24 @@ function vProgress() {
     objRow("Dips aux barres", first("dips"), last("dips"), 15, "") +
     objRow("Tour de bras contracté", br0, last("bras"), isNum(br0) ? br0 + 1 : null, " cm", isNum(br0) ? null : "départ + 1 cm") +
     objRow("Tour de poitrine", po0, last("poitrine"), isNum(po0) ? po0 + 2 : null, " cm", isNum(po0) ? null : "départ + 2 cm") +
-    '<tr><td>Masse grasse</td><td class="num">' + (b0 && isNum(b0.mg) ? fmt(b0.mg, 2) + " %" : "—") + '</td><td class="num">' + (bl && isNum(bl.mg) ? fmt(bl.mg, 2) + " %" : "—") + '</td><td class="num">−1,87 kg</td><td class="small muted">Biody</td></tr>' +
-    '<tr><td>Masse musculaire</td><td class="num">' + (b0 && isNum(b0.mm) ? fmt(b0.mm, 2) + " %" : "—") + '</td><td class="num">' + (bl && isNum(bl.mm) ? fmt(bl.mm, 2) + " %" : "—") + '</td><td class="num">+0,93 kg</td><td class="small muted">Biody</td></tr>' +
+    objRow("Poids (prise de muscle)", b0 && isNum(b0.poids) ? b0.poids : 61, latestWeight(), 63, " kg") +
+    objRow("Muscle squelettique", b0 && isNum(b0.mmKg) ? b0.mmKg : 29.08, bl && isNum(bl.mmKg) ? bl.mmKg : null, (b0 && isNum(b0.mmKg) ? b0.mmKg : 29.08) + 1, " kg") +
+    '<tr><td>Masse grasse</td><td class="num">' + (b0 && isNum(b0.mg) ? fmt(b0.mg, 1) + " %" : "—") + '</td><td class="num">' + (bl && isNum(bl.mg) ? fmt(bl.mg, 1) + " %" : "—") + '</td><td class="num">≤ 13 %</td><td>' + (bl && isNum(bl.mg) ? '<span class="pill ' + (bl.mg <= 13 ? 'good">OK' : 'warn">À surveiller') + '</span>' : '') + '</td></tr>' +
     '<tr><td>Régularité</td><td class="num">—</td><td class="num">' + (reg.pct == null ? "—" : reg.pct + " %") + '</td><td class="num">90 %</td><td>' + (reg.pct == null ? '<span class="muted small">—</span>' : '<div class="bar' + (reg.pct >= 90 ? " ok" : "") + '"><i style="width:' + Math.min(100, Math.round(reg.pct / 90 * 100)) + '%"></i></div>') + "</td></tr>" +
     "</tbody></table></div>";
-  const metrics = [["pompes", "Pompes max", ""], ["pas", "Pas (4 sem.)", ""], ["poids", "Poids", " kg"], ["mg", "Masse grasse", " %"], ["bras", "Tour de bras", " cm"]];
+  const bd = badges(), nb = bd.filter(b => b.ok).length;
+  h += '<h2>Badges <span class="muted" style="font-size:16px">' + nb + '/' + bd.length + '</span></h2><div class="badges">' + bd.map(b => '<div class="badge' + (b.ok ? ' on' : '') + '"><span class="bi">' + b.ic + '</span><b>' + esc(b.nom) + '</b><small>' + esc(b.info) + '</small></div>').join('') + '</div>';
+  const rec = records();
+  h += '<h2>Tes records</h2>' + (rec.length ? '<div class="card scroll"><table class="tbl"><thead><tr><th>Exercice</th><th>Meilleure série</th><th>Le</th></tr></thead><tbody>' + rec.map(r => '<tr><td>' + esc(r.nom) + '</td><td class="num"><b>' + r.best + '</b> ' + esc(r.u) + '</td><td class="num">' + fdate(r.date) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="card"><p class="muted">Tes records apparaîtront après tes premières séances guidées.</p></div>');
+  h += '<h2>Volume par semaine</h2><div class="card"><p class="small muted">Répétitions totales des séances A, B et C.</p>' + volumeBars(weekVolume()) + '</div>';
+  const metrics = [["pompes", "Pompes max", ""], ["pas", "Pas (4 sem.)", ""], ["poids", "Poids", " kg"], ["mmKg", "Muscle", " kg"], ["mg", "Masse grasse", " %"], ["bras", "Tour de bras", " cm"]];
   const cur = metrics.find(m => m[0] === S.metric) || metrics[0];
   h += '<h2>Courbe</h2><div class="card chart"><div class="row" role="group" aria-label="Mesure affichée">' + metrics.map(m => '<button type="button" class="chip' + (m[0] === cur[0] ? " sel" : "") + '" data-act="metric" data-m="' + m[0] + '" aria-pressed="' + (m[0] === cur[0]) + '">' + m[1] + "</button>").join("") + '</div><div class="mt">' + chartSvg(metricSeries(cur[0]), cur[2]) + "</div></div>";
   h += "<h2>Ajouter un test</h2>" + formHtml("test", [["date", "Date", "date"], ["pompes", "Pompes max", "number"], ["archer", "Archer / côté", "number"], ["planche", "Planche (s)", "number"], ["tractions", "Tractions", "number"], ["dips", "Dips", "number"], ["bras", "Tour de bras (cm)", "number"], ["poitrine", "Tour de poitrine (cm)", "number"], ["poids", "Poids (kg)", "number"]], "Enregistrer le test");
   if (tests.length) h += histTable("tests", [["pompes", "Pompes"], ["archer", "Archer"], ["planche", "Planche s"], ["tractions", "Tract."], ["dips", "Dips"], ["bras", "Bras cm"], ["poitrine", "Poitr. cm"], ["poids", "Poids"]]);
-  h += '<h2>Bilans Biody</h2><div class="card"><p>Prochains : ' + BILAN_DATES.map(d => fdate(d) + (d.slice(0, 4) === "2027" ? " 2027" : "")).join(", ") + '.</p><p class="small muted mt">Pour comparer : même créneau qu\'au départ (vers 12 h 50), avant le repas, vessie vide, pas de sport dans les 12 h avant, pas d\'alcool la veille.</p></div>';
-  h += formHtml("bilan", [["date", "Date", "date"], ["poids", "Poids (kg)", "number"], ["mg", "Masse grasse (%)", "number"], ["mm", "Masse musc. (%)", "number"], ["hydra", "Hydratation (%)", "number"], ["angle", "Angle de phase (°)", "number"]], "Enregistrer le bilan");
-  if (bil.length) h += histTable("bilans", [["poids", "Poids"], ["mg", "Gras %"], ["mm", "Muscle %"], ["hydra", "Hydra %"], ["angle", "Angle °"]]);
+  h += '<h2>Bilans Biody</h2><div class="card stack"><p><b>Ta fiche du 17/11 :</b> muscle squelettique 29,1 kg (référence 28,2 kg), masse grasse 7,2 kg soit 11,7 % (référence 14,9 %), indice de masse maigre 18,6 kg/m² (référence 17), eau totale 38,7 L (référence 39,5 L), angle de phase 7,8°. Tu es déjà plus musclé et plus sec que la référence : l\'objectif est de prendre du muscle, pas de perdre du gras.</p><p>Prochains : ' + BILAN_DATES.map(d => fdate(d) + (d.slice(0, 4) === "2027" ? " 2027" : "")).join(", ") + '.</p><p class="small muted mt">Pour comparer : même créneau qu\'au départ (vers 12 h 50), avant le repas, vessie vide, pas de sport dans les 12 h avant, pas d\'alcool la veille.</p></div>';
+  h += formHtml("bilan", [["date", "Date", "date"], ["poids", "Poids (kg)", "number"], ["mg", "Masse grasse (%)", "number"], ["mm", "Masse musc. (%)", "number"], ["mmKg", "Muscle squelettique (kg)", "number"], ["mgKg", "Masse grasse (kg)", "number"], ["eau", "Eau totale (L)", "number"], ["hydra", "Hydratation (%)", "number"], ["angle", "Angle de phase (°)", "number"]], "Enregistrer le bilan");
+  if (bil.length) h += histTable("bilans", [["poids", "Poids"], ["mmKg", "Muscle kg"], ["mg", "Gras %"], ["mgKg", "Gras kg"], ["eau", "Eau L"], ["angle", "Angle °"]]);
   return h;
 }
 
@@ -795,12 +1228,12 @@ function vPlus() {
     '<div class="row"><a class="btn sm" href="shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT_NAME) + '" data-act="health">Tester le raccourci</a></div></div>';
 
   const wt = latestWeight();
-  const lo = isNum(wt) ? Math.round(wt * 1.6 / 5) * 5 : 100, hi = isNum(wt) ? Math.round(wt * 2 / 5) * 5 : 120;
+  const lo = isNum(wt) ? Math.round(wt * 1.8 / 5) * 5 : 110, hi = isNum(wt) ? Math.round(wt * 2.1 / 5) * 5 : 130;
   h += "<h2>Nutrition</h2>";
-  h += '<div class="card stack"><p><strong>Mange autour de 2 500 kcal par jour, sans régime.</strong> À 11,7 % de gras, le sport en plus suffit à créer un petit déficit ; manger moins te ferait perdre du muscle.</p>' +
-    "<p><strong>Protéines : " + lo + " à " + hi + " g par jour</strong> (1,6 à 2 g par kilo" + (isNum(wt) ? ", calculé sur " + fmt(wt) + " kg" : "") + "), en 3 ou 4 repas de 30 à 40 g.</p>" +
-    "<p><strong>Ton poids sert de boussole :</strong> pèse-toi une fois par semaine, le matin à jeun. S'il baisse de plus de 1 kg en 4 semaines, ajoute une collation par jour (skyr + banane + une poignée d'amandes).</p>" +
-    '<ul class="plain"><li>Féculents autour des séances (pâtes, riz, pain, fruits) : c\'est le carburant.</li><li>Légumes à 2 repas, environ 2 L d\'eau, plus les jours de vélo.</li><li>Sommeil : 8 h. C\'est la nuit que le muscle se construit.</li><li>Alcool : une soirée arrosée freine la récupération 1 à 2 jours.</li><li>Option : créatine monohydrate, 3 g par jour. Pas obligatoire.</li></ul></div>';
+  h += '<div class="card stack"><p><strong>Objectif : prendre du muscle proprement, autour de 2 700 à 2 800 kcal par jour.</strong> Ta dépense mesurée est de 2 380 kcal avec une activité faible ; avec tes séances et le vélo, tu montes vers 2 600. Il faut un petit surplus de 200 kcal, sinon le muscle ne se construit pas.</p>' +
+    "<p><strong>Protéines : " + lo + " à " + hi + " g par jour</strong> (1,8 à 2,1 g par kilo" + (isNum(wt) ? ", calculé sur " + fmt(wt) + " kg" : "") + "), en 3 ou 4 repas de 30 à 40 g.</p>" +
+    "<p><strong>Ta balance sert de boussole :</strong> pèse-toi chaque lundi matin à jeun (champ « Pesée du jour » dans Progrès). Vise environ +0,25 kg par semaine, soit 63 kg mi-février. Si tu prends plus de 0,5 kg par semaine, enlève une collation ; si rien ne bouge pendant 2 semaines, ajoute-en une (skyr + banane + une poignée d'amandes, environ 350 kcal).</p>" +
+    '<ul class="plain"><li>Féculents autour des séances (pâtes, riz, pain, fruits) : c\'est le carburant.</li><li>Eau : 2 à 2,5 L par jour, plus les jours de vélo. Ton eau totale était un peu sous la référence (38,7 L pour 39,5 L).</li><li>Légumes à 2 repas.</li><li>Sommeil : 8 h. C\'est la nuit que le muscle se construit.</li><li>Alcool : une soirée arrosée freine la récupération 1 à 2 jours.</li><li>Option : créatine monohydrate, 3 g par jour. Pas obligatoire.</li></ul></div>';
   h += '<div class="card scroll mt"><table class="tbl"><thead><tr><th>Aliment</th><th>Portion</th><th>Protéines (approx.)</th></tr></thead><tbody>' +
     [["Blanc de poulet", "150 g", "35 g"], ["Thon en boîte, égoutté", "140 g", "35 g"], ["Steak haché 5 %", "125 g", "25 g"], ["Skyr", "200 g", "20 g"], ["Œufs", "3", "18 g"], ["Lentilles cuites", "200 g", "18 g"]]
       .map(x => "<tr><td>" + x[0] + '</td><td class="num">' + x[1] + '</td><td class="num">' + x[2] + "</td></tr>").join("") + "</tbody></table></div>";
@@ -889,6 +1322,14 @@ $app.addEventListener("click", e => {
       break;
     }
     case "start": startRun(ds.code, ds.date); break;
+    case "play": openPlay(ds.code, ds.date); break;
+    case "weigh": {
+      const v = toNum((document.getElementById("quick-w") || {}).value);
+      if (!isNum(v) || v < 30 || v > 200) { S.formMsg.weigh = "Entre ton poids en kg, par exemple 61,4."; render(); break; }
+      const doc = clone(D("tests")); const tk = todayKey();
+      doc.items = (Array.isArray(doc.items) ? doc.items : []).filter(x => !(x.date === tk && Object.keys(x).length === 2 && isNum(x.poids)));
+      doc.items.push({ date: tk, poids: v }); doc.items.sort(byDate); write("tests", doc); S.formMsg.weigh = ""; render(); break;
+    }
     case "open": { const cur = (ds.key in S.open) ? S.open[ds.key] : ds.def === "1"; S.open[ds.key] = !cur; render(); break; }
     case "video": S.vid[ds.key] = !S.vid[ds.key]; render(); break;
     case "rest": startCountdown(Number(ds.s), "Repos", "rest"); break;
@@ -978,7 +1419,7 @@ $app.addEventListener("focusout", () => {
 $app.addEventListener("submit", e => {
   e.preventDefault();
   const f = e.target, kind = f.dataset.form;
-  const keys = kind === "test" ? ["pompes", "archer", "planche", "tractions", "dips", "bras", "poitrine", "poids"] : ["poids", "mg", "mm", "hydra", "angle"];
+  const keys = kind === "test" ? ["pompes", "archer", "planche", "tractions", "dips", "bras", "poitrine", "poids"] : ["poids", "mg", "mm", "mmKg", "mgKg", "eau", "hydra", "angle"];
   const it = { date: (f.elements.date && f.elements.date.value) || todayKey() };
   keys.forEach(k => { const v = toNum(f.elements[k] && f.elements[k].value); if (isNum(v)) it[k] = v; });
   if (Object.keys(it).length < 2) { S.formMsg[kind] = "Remplis au moins une mesure."; render(); return; }
@@ -1029,5 +1470,6 @@ if ("serviceWorker" in navigator) {
 renderStatus();
 route();
 if (run) { keepAwake(true); startTicker(); }
+if (play && play.open) { renderPlay(); startPlayTicker(); }
 if (token()) sync();
 })();

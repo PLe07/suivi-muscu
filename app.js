@@ -554,7 +554,8 @@ function endTrk() {
   if (trk.pauseAt) { trk.paused += n - trk.pauseAt; trk.pauseAt = null; }
   trk.end = n; stopGps();
   if (!run) keepAwake(false);
-  trkCount = true; trkDel = false;
+  trkCount = trkSecs(trk) >= 600 && trk.km >= 0.3; // un essai de quelques secondes ne coche pas la séance
+  trkDel = false;
   trkPersist(true); renderTrk();
 }
 function resumeTrk() {
@@ -1877,6 +1878,6 @@ renderStatus();
 route();
 if (run) { keepAwake(true); startTicker(); }
 if (play && play.open) { renderPlay(); startPlayTicker(); }
-if (trk) openTrk();
+if (trk) { if (trk.end) trkCount = trkSecs(trk) >= 600 && trk.km >= 0.3; openTrk(); }
 if (token()) sync();
 })();

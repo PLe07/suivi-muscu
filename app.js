@@ -7,9 +7,9 @@
 /* ---------- Configuration ---------- */
 const DATA_REPO = "PLe07/suivi-muscu-data";
 const VAPID_PUBLIC = "BCEI2u1482k-3IQi3ootVf93p5KR34y8_zLbJsrj9gTbtWPHvJaYAxC3-Dg2ESeHZB00WDzXqzvq3s2McjymQKw";
-const SHORTCUT_NAME = "Pas Suivi";
 const STEP_GOAL = 8000;
-const STRIDE_M = 0.70; // longueur de pas estimée pour 1,70 m : sert à convertir les pas en km
+const STRIDE_M = 0.70; // longueur de pas estimée pour 1,70 m : 1 km de marche ≈ 1 430 pas
+const GPS_STEPS_FROM = "2026-11-23"; // à partir de ce jour, les pas viennent des marches GPS (plus de Santé)
 
 /* ---------- Programme ---------- */
 const START = new Date(2026, 10, 23); // lundi de la semaine 1
@@ -128,7 +128,7 @@ const reglages = () => { const r = D("reglages") || {}; return Object.assign({},
 
 /* ---------- Synchronisation GitHub ---------- */
 const S = { view:"aujourdhui", wOff:0, scope:"week", sel:null, addFor:null, open:{}, vid:{}, metric:"pompes", confirmDel:null, formMsg:{}, sync:"local", syncMsg:"", push:{ supported:false, sub:false }, msg:{} };
-let syncTimer = null, syncing = false, syncAgain = false, pendingRender = false, pollUntil = 0;
+let syncTimer = null, syncing = false, syncAgain = false, pendingRender = false;
 
 function b64enc(str) { const bytes = new TextEncoder().encode(str); let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(bin); }
 function b64dec(b64) { const bin = atob(String(b64).replace(/\s/g, "")); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return new TextDecoder().decode(bytes); }
@@ -268,11 +268,25 @@ function regularity() {
   }
   return { pm, dm, pct: pm ? Math.round(dm / pm * 100) : null };
 }
+/* Pas du jour : km marchés au GPS convertis en pas (1 pas ≈ 70 cm) + pas ajoutés à la main.
+   Les anciens imports de l'app Santé ne servent plus que pour l'historique d'avant le 23/11. */
+function walkKmGps(date) {
+  let km = 0;
+  for (const id in state.docs) {
+    if (id.slice(0, 2) !== "g-") continue;
+    const g = state.docs[id];
+    if (g && !g.del && g.date === date && g.type === "MARCHE" && isNum(g.km)) km += g.km;
+  }
+  return km;
+}
 function pasFor(date) {
-  const a = state.pas && state.pas[date];
-  if (a && isNum(a.pas)) return { v: a.pas, auto: true, at: a.at };
+  const km = walkKmGps(date);
   const j = D("j-" + date);
-  if (j && isNum(j.pas)) return { v: j.pas, auto: false };
+  const extra = j && isNum(j.pas) ? Math.max(0, j.pas) : 0;
+  const gps = Math.round(km * 1000 / STRIDE_M);
+  if (gps || extra) return { v: gps + extra, gps: gps, km: km, extra: extra };
+  const a = state.pas && state.pas[date];
+  if (date < GPS_STEPS_FROM && a && isNum(a.pas)) return { v: a.pas, gps: 0, km: 0, extra: 0, old: true };
   return null;
 }
 
@@ -432,11 +446,11 @@ function sorties() {
     .filter(s => s && s.date && !s.del && TRK[s.type]).sort((a, b) => (b.start || 0) - (a.start || 0));
 }
 function kmDay(k) {
-  const p = pasFor(k), fromSteps = p ? stepsKm(p.v) : 0;
-  let bike = 0, gpsWalk = 0;
-  sorties().forEach(s => { if (s.date === k) { if (s.type === "VELO") bike += s.km || 0; else gpsWalk += s.km || 0; } });
-  const walk = Math.max(fromSteps, gpsWalk);
-  return { walk: walk, walkSrc: fromSteps >= gpsWalk ? "pas" : "gps", bike: bike, total: walk + bike };
+  const p = pasFor(k);
+  let bike = 0;
+  sorties().forEach(s => { if (s.date === k && s.type === "VELO") bike += s.km || 0; });
+  const walk = p ? (p.km || 0) + stepsKm((p.extra || 0) + (p.old ? p.v : 0)) : 0;
+  return { walk: walk, bike: bike, total: walk + bike };
 }
 function kmWeek(mon) {
   let walk = 0, bike = 0;
@@ -1081,7 +1095,7 @@ function records() {
 }
 const PUSH_IDS = { a1: 1, a2: 1, a4: 1, a5: 1, a6: 1, c1: 2, c2: 1 };
 function pushupTotal() { let t = 0; allSessions().forEach(s => { for (const id in PUSH_IDS) { const v = s.sets && s.sets[id]; if (Array.isArray(v)) v.forEach(n => { if (isNum(n)) t += n * PUSH_IDS[id]; }); } }); return t; }
-function stepDays() { let n = 0; Object.keys(state.pas || {}).forEach(k => { const p = pasFor(k); if (p && p.v >= STEP_GOAL) n++; }); for (const id in state.docs) if (id.slice(0, 2) === "j-" && !(state.pas || {})[id.slice(2)]) { const j = state.docs[id]; if (j && isNum(j.pas) && j.pas >= STEP_GOAL) n++; } return n; }
+function stepDays() { let n = 0; const t = todayKey(); for (let d = parseYmd("2026-11-16"); ymd(d) <= t; d = addDays(d, 1)) { const p = pasFor(ymd(d)); if (p && p.v >= STEP_GOAL) n++; } return n; }
 function perfectWeeks() {
   let n = 0;
   const cur = weekNum(mondayOf(new Date()));
@@ -1269,23 +1283,24 @@ function stepsCard(t) {
   const pct = p ? Math.min(100, Math.round(p.v / STEP_GOAL * 100)) : 0;
   const km = kmDay(t);
   let h = '<div class="card"><div class="between"><h3>Pas et km du jour</h3><span class="small muted">objectif 8 000 pas</span></div>';
-  h += '<div class="row mt" style="align-items:baseline;gap:6px 8px"><span class="bigsteps">' + (p ? fmt(p.v, 0) : "—") + '</span><span class="small muted">pas</span>' +
+  h += '<div class="row mt" style="align-items:baseline;gap:6px 8px"><span class="bigsteps">' + (p ? fmt(p.v, 0) : "0") + '</span><span class="small muted">pas</span>' +
     (km.total > 0 ? '<span class="bigkm">' + fmtKm(km.total, 1) + '</span><span class="small muted">km</span>' : "") + "</div>";
   h += '<div class="bar mt' + (pct >= 100 ? " ok" : "") + '"><i style="width:' + pct + '%"></i></div>';
   const parts = [];
-  if (km.walk > 0) parts.push("🚶 " + fmtKm(km.walk, 1) + " km à pied" + (km.walkSrc === "pas" ? " (d'après tes pas)" : " (GPS)"));
+  if (p && p.km > 0) parts.push("🚶 " + fmtKm(p.km, 1) + " km de marche au GPS ≈ " + fmt(p.gps, 0) + " pas");
+  if (p && p.extra > 0) parts.push("+ " + fmt(p.extra, 0) + " pas ajoutés à la main");
   if (km.bike > 0) parts.push("🚲 " + fmtKm(km.bike, 1) + " km à vélo");
   if (parts.length) h += '<p class="small mt">' + parts.join(" · ") + "</p>";
-  if (p && p.v < STEP_GOAL) h += '<p class="small mt">Il t\'en manque ' + fmt(STEP_GOAL - p.v, 0) + ", soit environ " + Math.max(5, Math.round((STEP_GOAL - p.v) / 100 / 5) * 5) + " min de marche.</p>";
-  h += '<p class="small muted mt">' + (p && p.auto ? "Reçus de Santé à " + hhmm(p.at) + ", sans rien toucher." : p ? "Saisis à la main." : "Pas encore reçus aujourd'hui.") +
-    (p && p.auto ? "" : ' <a href="#plus">Les recevoir tout seuls</a>') + "</p>";
+  const left = STEP_GOAL - (p ? p.v : 0);
+  if (left > 0) h += '<p class="small mt">Il t\'en manque ' + fmt(left, 0) + " : environ " + fmtKm(stepsKm(left), 1) + " km, soit " + Math.max(5, Math.round(stepsKm(left) / 5 * 60 / 5) * 5) + " min de marche. Lance le GPS marche en sortant.</p>";
+  else h += '<p class="small mt" style="color:var(--good);font-weight:700">Objectif de pas atteint 👏</p>';
   const ss = sorties().filter(s => s.date === t);
   if (ss.length) h += '<div class="mt">' + ss.map(s => sortieRow(s)).join("") + "</div>";
   h += '<div class="row mt">' + (trk
     ? '<button type="button" class="btn sm" data-act="gpsopen">📍 Sortie en cours · ' + fmtKm(trk.km) + " km</button>"
-    : '<button type="button" class="btn sm" data-act="gps" data-type="MARCHE">🚶 GPS marche</button><button type="button" class="btn sm" data-act="gps" data-type="VELO">🚲 GPS vélo</button>') +
-    '<a class="btn sm ghost" href="shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT_NAME) + '" data-act="health">Mettre à jour les pas</a></div>';
-  h += '<details class="warm mt"><summary>Saisir les pas à la main</summary><label class="f mt" for="pas-' + t + '" style="max-width:200px">Nombre de pas<input id="pas-' + t + '" type="number" inputmode="numeric" min="0" step="100" value="' + (isNum(j.pas) ? j.pas : "") + '" data-act="pas" data-date="' + t + '"></label></details>';
+    : '<button type="button" class="btn sm" data-act="gps" data-type="MARCHE">🚶 GPS marche</button><button type="button" class="btn sm" data-act="gps" data-type="VELO">🚲 GPS vélo</button>') + "</div>";
+  h += '<p class="small muted mt">Tes pas sont calculés à partir de tes marches GPS : 1 km ≈ ' + fmt(Math.round(1000 / STRIDE_M / 10) * 10, 0) + " pas.</p>";
+  h += '<details class="warm mt"><summary>Marché sans le GPS ? Ajoute des pas à la main</summary><label class="f mt" for="pas-' + t + '" style="max-width:220px">Pas en plus aujourd\'hui<input id="pas-' + t + '" type="number" inputmode="numeric" min="0" step="100" value="' + (isNum(j.pas) && j.pas > 0 ? j.pas : "") + '" data-act="pas" data-date="' + t + '"></label></details>';
   return h + "</div>";
 }
 function weekStrip(mon, plan, tk) {
@@ -1559,7 +1574,7 @@ function vProgress() {
     '<div class="card tile"><div class="big">' + fmtKm(kw.walk, 1) + '</div><div class="lbl">à pied · semaine</div></div>' +
     '<div class="card tile"><div class="big">' + fmtKm(kw.bike, 1) + '</div><div class="lbl">à vélo · semaine</div></div>' +
     '<div class="card tile"><div class="big">' + fmtKm(bikeTot, bikeTot >= 100 ? 0 : 1) + '</div><div class="lbl">km vélo au total</div></div></div>';
-  h += '<div class="card mt"><p class="small muted">À pied : d\'après tes pas (ou le GPS si la sortie fait plus). À vélo : sorties GPS.</p>' + kmBars() + "</div>";
+  h += '<div class="card mt"><p class="small muted">À pied et à vélo : tes sorties GPS (plus les pas ajoutés à la main).</p>' + kmBars() + "</div>";
   h += ss.length ? '<div class="card mt"><h3>Tes sorties GPS</h3><div class="mt">' + ss.slice(0, 10).map(x => sortieRow(x, true)).join("") + "</div></div>"
     : '<div class="card mt"><p class="muted">Ta prochaine sortie vélo ou marche : lance le GPS depuis Aujourd\'hui. Distance, durée, vitesse et tracé s\'enregistrent ici.</p></div>';
   const metrics = [["pompes", "Pompes max", ""], ["pas", "Pas (4 sem.)", ""], ["poids", "Poids", " kg"], ["mmKg", "Muscle", " kg"], ["mg", "Masse grasse", " %"], ["bras", "Tour de bras", " cm"]];
@@ -1607,29 +1622,15 @@ function vPlus() {
     '<label class="toggle" for="n-seance"><input type="checkbox" id="n-seance" data-act="notif" data-k="seance"' + (n.seance ? " checked" : "") + "><span>Séance du jour</span></label>" +
     '<div class="form"><label class="f" for="h-seance">Rappel séance (chambre)<select id="h-seance" data-act="heure" data-k="heureSeance">' + timeOptions(17 * 60 + 30, 20 * 60 + 30, 15, r.heureSeance) + "</select></label>" +
     '<label class="f" for="h-parc">Rappel séance au parc<select id="h-parc" data-act="heure" data-k="heureParc">' + timeOptions(6 * 60, 7 * 60 + 30, 15, r.heureParc) + "</select></label></div>" +
-    '<label class="toggle" for="n-pas"><input type="checkbox" id="n-pas" data-act="notif" data-k="pas"' + (n.pas ? " checked" : "") + "><span>Pas du soir, si tu es sous 8 000</span></label>" +
+    '<label class="toggle" for="n-pas"><input type="checkbox" id="n-pas" data-act="notif" data-k="pas"' + (n.pas ? " checked" : "") + "><span>Pas du soir, si tu es sous 8 000 (marches GPS)</span></label>" +
     '<div class="form"><label class="f" for="h-pas">Heure<select id="h-pas" data-act="heure" data-k="heurePas">' + timeOptions(19 * 60 + 30, 20 * 60 + 45, 15, r.heurePas) + "</select></label></div>" +
     '<label class="toggle" for="n-bilan"><input type="checkbox" id="n-bilan" data-act="notif" data-k="bilan"' + (n.bilan ? " checked" : "") + "><span>Bilan du dimanche</span></label>" +
     '<div class="form"><label class="f" for="h-bilan">Heure<select id="h-bilan" data-act="heure" data-k="heureBilan">' + timeOptions(18 * 60, 20 * 60 + 30, 15, r.heureBilan) + "</select></label></div>" +
     '<label class="toggle" for="n-biody"><input type="checkbox" id="n-biody" data-act="notif" data-k="biody"' + (n.biody ? " checked" : "") + "><span>Veille de bilan Biody (20 h)</span></label></div>";
   h += '<p class="small muted">Les rappels partent de ton dépôt privé (GitHub Actions), à quelques minutes près.</p></div>';
 
-  const sc = encodeURIComponent(SHORTCUT_NAME);
-  h += "<h2>Pas automatiques</h2><div class=\"card stack\"><p>Ton raccourci <code>" + SHORTCUT_NAME + "</code> lit tes pas dans Santé et les envoie à l'app. Pour qu'il tourne <strong>tout seul, sans rien toucher</strong>, crée ces automatisations une seule fois (2 minutes) :</p>" +
-    '<ol class="rules small"><li>App <strong>Raccourcis</strong> → onglet <strong>Automatisation</strong> → <strong>+</strong>.</li>' +
-    "<li><strong>Heure de la journée</strong> → <strong>12 h 30</strong> → <strong>Quotidien</strong> → coche <strong>Exécuter immédiatement</strong> et désactive <em>M'avertir lors de l'exécution</em> → Suivant.</li>" +
-    "<li>Choisis l'action <strong>Exécuter le raccourci</strong> → <code>" + SHORTCUT_NAME + "</code> → OK.</li>" +
-    "<li>Refais pareil pour <strong>18 h 30</strong> et <strong>21 h 45</strong>. Supprime l'ancienne automatisation de 19 h 45 si tu l'avais créée.</li></ol>" +
-    '<p class="small muted">Pourquoi trois horaires : iOS bloque la lecture de Santé quand l\'iPhone est verrouillé. Si un horaire tombe pendant que le téléphone dort, le suivant rattrape. Le total du jour est remplacé à chaque envoi : rien ne compte en double.</p>' +
-    '<p class="small muted">Les km à pied viennent de tes pas (1 pas ≈ ' + fmt(STRIDE_M * 100, 0) + ' cm). Pour le vélo, lance le GPS.</p>' +
-    '<div class="row"><a class="btn sm" href="shortcuts://run-shortcut?name=' + sc + '" data-act="health">Tester le raccourci</a></div>' +
-    '<details class="warm"><summary>Recréer le raccourci « ' + SHORTCUT_NAME + ' » si tu l\'as supprimé</summary><ol class="rules small"><li>Nouveau raccourci, nommé exactement <code>' + SHORTCUT_NAME + "</code>.</li>" +
-    "<li>Action <strong>Rechercher des échantillons de santé</strong> : Type = <em>Pas</em>, Date de début = <em>Aujourd'hui</em>.</li>" +
-    "<li>Action <strong>Calculer les statistiques</strong> : <em>Somme</em> des échantillons de santé.</li>" +
-    "<li>Action <strong>Formater la date</strong> : Date actuelle, format personnalisé <code>yyyy-MM-dd</code>.</li>" +
-    "<li>Action <strong>Obtenir le contenu de l'URL</strong> : <code>https://api.github.com/repos/" + DATA_REPO + "/dispatches</code>, méthode <em>POST</em>.<br>En-têtes : <code>Authorization</code> = <code>Bearer</code> + espace + ton token ; <code>Accept</code> = <code>application/vnd.github+json</code>.<br>Corps JSON : <code>event_type</code> (texte) = <code>pas</code> ; <code>client_payload</code> (dictionnaire) avec <code>date</code> (texte) = la date formatée et <code>pas</code> (nombre) = les statistiques.</li></ol></details></div>";
-
-  h += '<h2>Traceur GPS</h2><div class="card stack"><p>Pour le vélo et la marche : <strong>Aujourd\'hui → 🚲 GPS vélo</strong> ou <strong>🚶 GPS marche</strong>. Carte en direct, km, durée, vitesse ; à la fin, la sortie s\'enregistre et coche ta séance.</p>' +
+  h += '<h2>Traceur GPS et pas</h2><div class="card stack"><p>Pour le vélo et la marche : <strong>Aujourd\'hui → 🚲 GPS vélo</strong> ou <strong>🚶 GPS marche</strong>. Carte en direct, km, durée, vitesse ; à la fin, la sortie s\'enregistre et coche ta séance.</p>' +
+    '<p><strong>Tes pas viennent de tes marches GPS</strong> : 1 km ≈ ' + fmt(Math.round(1000 / STRIDE_M / 10) * 10, 0) + ' pas (un pas d\'environ ' + fmt(STRIDE_M * 100, 0) + ' cm). Plus besoin de l\'app Santé ni du raccourci : tu peux supprimer le raccourci « Pas Suivi » et ses automatisations. Une marche faite sans GPS s\'ajoute à la main dans Aujourd\'hui.</p>' +
     '<ul class="plain small"><li>La première fois, autorise la localisation. Si tu as refusé : Réglages → Confidentialité et sécurité → Service de localisation → Sites Safari → « Lorsque l\'app est active » et « Position exacte ».</li>' +
     "<li>Garde l'app ouverte pendant la sortie : l'écran reste allumé. En poche ou sur le guidon, touche <strong>Mode poche</strong> (écran noir, appui long pour revenir).</li>" +
     "<li>Si l'écran se verrouille quand même, le GPS s'arrête (règle d'iOS pour les apps web) : en revenant, le trou est relié en ligne droite.</li></ul></div>";
@@ -1750,7 +1751,6 @@ $app.addEventListener("click", e => {
     case "hold": startCountdown(Number(ds.s), ds.l || "Tiens", "hold"); break;
     case "extra": editDay(ds.date, j => { j.extra = Array.isArray(j.extra) ? j.extra : []; if (j.extra.indexOf(ds.code) < 0) j.extra.push(ds.code); }); S.open[ds.date + ds.code] = true; render(); break;
     case "unextra": editDay(ds.date, j => { j.extra = (Array.isArray(j.extra) ? j.extra : []).filter(c => c !== ds.code); }); break;
-    case "health": pollUntil = Date.now() + 3 * 60 * 1000; schedulePoll(); break;
     case "wnav": S.wOff += Number(ds.d); S.sel = null; S.addFor = null; render(); break;
     case "scope": S.scope = ds.s; S.sel = null; S.addFor = null; render(); break;
     case "chip": { const d = Number(ds.day), x = Number(ds.idx); S.sel = (S.sel && S.sel.day === d && S.sel.idx === x) ? null : { day: d, idx: x }; S.addFor = null; render(); break; }
@@ -1852,14 +1852,6 @@ document.addEventListener("error", e => {
   if (!box) return;
   box.innerHTML = '<div class="vfoot">Pas encore de vidéo pour cet exercice dans l\'app. <a href="' + ytLink(box.dataset.yt || "") + '" target="_blank" rel="noopener">Voir des démos sur YouTube</a></div>';
 }, true);
-
-/* Après « Mettre à jour depuis Santé » : on relit pas.json quelques fois */
-let pollTimer = null;
-function schedulePoll() {
-  clearTimeout(pollTimer);
-  if (Date.now() > pollUntil || !token()) return;
-  pollTimer = setTimeout(async () => { if (document.visibilityState === "visible") await sync(); schedulePoll(); }, 20000);
-}
 
 /* ---------- Navigation ---------- */
 const VIEWS = ["aujourdhui", "semaine", "seances", "progres", "plus"];

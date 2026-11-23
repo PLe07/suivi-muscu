@@ -1,6 +1,6 @@
 /* Service worker : app hors ligne + notifications push */
-const CACHE = "suivi-muscu-v2";
-const ASSETS = ["./", "./index.html", "./app.js", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png"];
+const CACHE = "suivi-muscu-v3";
+const ASSETS = ["./", "./index.html", "./app.js", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png", "./vendor/leaflet.js", "./vendor/leaflet.css"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));

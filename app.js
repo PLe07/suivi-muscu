@@ -9,6 +9,7 @@ const DATA_REPO = "PLe07/suivi-muscu-data";
 const VAPID_PUBLIC = "BCEI2u1482k-3IQi3ootVf93p5KR34y8_zLbJsrj9gTbtWPHvJaYAxC3-Dg2ESeHZB00WDzXqzvq3s2McjymQKw";
 const SHORTCUT_NAME = "Pas Suivi";
 const STEP_GOAL = 8000;
+const STRIDE_M = 0.70; // longueur de pas estimée pour 1,70 m : sert à convertir les pas en km
 
 /* ---------- Programme ---------- */
 const START = new Date(2026, 10, 23); // lundi de la semaine 1
@@ -42,11 +43,11 @@ const EX = {
     { id:"a6", nom:"Pompes classiques", detail:"une série, maximum moins 1", series:1, min:null, max:null, u:"rép.", repos:0, c:"Ton test de la semaine : le chiffre alimente ta courbe de progrès.", fin:true, v:"pompes", yt:"pompes technique parfaite" }
   ],
   B: [
-    { id:"b1", nom:"Tractions pronation", detail:"paumes vers l'avant", series:4, min:5, max:12, u:"rép.", repos:120, c:"Moins de 5 ? Saute en haut et redescends en 5 s (négatives).", v:"tractions-pronation", yt:"traction pronation technique" },
-    { id:"b2", nom:"Dips aux barres parallèles", detail:"", series:4, min:8, max:15, u:"rép.", repos:120, c:"Le meilleur exercice pecs + triceps sans matériel. Buste penché en avant = plus de pecs.", v:"dips-barres", yt:"dips barres parallèles pectoraux technique" },
-    { id:"b3", nom:"Chin-ups", detail:"paumes vers toi", series:3, min:6, max:12, u:"rép.", repos:90, c:"Biceps. Menton au-dessus de la barre, descente contrôlée.", v:"chin-ups", yt:"chin up technique" },
-    { id:"b4", nom:"Rowing australien", detail:"sous une barre basse", series:3, min:10, max:15, u:"rép.", repos:90, c:"Dos et biceps. La poitrine vient toucher la barre.", v:"rowing-australien", yt:"rowing australien technique" },
-    { id:"b5", nom:"Relevés de genoux suspendu", detail:"", series:3, min:10, max:15, u:"rép.", repos:60, c:"Abdos, sans te balancer.", v:"releves-genoux-suspendu", yt:"relevé de genoux suspendu technique" }
+    { id:"b1", nom:"Tractions pronation", detail:"paumes vers l'avant", series:4, min:2, max:5, u:"rép.", repos:120, c:"Ton test : 2 d'affilée. Fais tes répétitions propres, puis 1 ou 2 négatives dans la même série (saute en haut, redescends en 5 s). 5 partout : on remonte la fourchette.", v:"tractions-pronation", yt:"traction pronation technique" },
+    { id:"b2", nom:"Dips sur un banc", detail:"pas de barres à dips au parc", series:3, min:12, max:20, u:"rép.", repos:90, c:"Dos à un banc, mains au bord, jambes tendues. Épaules basses, coudes à 90° maximum. Trop facile : pieds posés sur un 2e banc.", v:"dips-chaise", yt:"bench dips technique" },
+    { id:"b3", nom:"Chin-ups", detail:"paumes vers toi", series:3, min:3, max:6, u:"rép.", repos:120, c:"Ton test : 3 d'affilée. Biceps. Menton au-dessus de la barre, descente en 3 s.", v:"chin-ups", yt:"chin up technique" },
+    { id:"b4", nom:"Rowing australien", detail:"sous une barre basse", series:3, min:10, max:15, u:"rép.", repos:90, c:"Ton test : 13 d'affilée. Dos et biceps. Corps gainé, la poitrine vient toucher la barre.", v:"rowing-australien", yt:"rowing australien technique" },
+    { id:"b5", nom:"Relevés de genoux suspendu", detail:"lents, bassin enroulé", series:3, min:15, max:25, u:"rép.", repos:60, c:"Ton test : 27 d'affilée. 2 s pour monter les genoux à la poitrine, 2 s pour redescendre, sans te balancer. 25 partout : passe aux jambes tendues.", v:"releves-genoux-suspendu", yt:"relevé de genoux suspendu technique" }
   ],
   C: [
     { id:"c1", nom:"Pompes archer", detail:"pompes larges si trop dur", series:4, min:6, max:10, u:"rép./côté", repos:90, c:"Le bras tendu sur le côté aide à peine : tout passe par l'autre.", v:"pompes-archer", yt:"pompes archer technique" },
@@ -357,6 +358,353 @@ function metricSeries(m) {
   return out;
 }
 
+/* ---------- Traceur GPS (vélo, marche) ---------- */
+/* Une app web sur iPhone n'a le GPS que tant qu'elle est ouverte à l'écran : l'écran reste allumé
+   (Wake Lock) et un mode poche noir évite les touches involontaires. Si l'écran se verrouille quand même,
+   le trou est relié en ligne droite au retour. */
+const LS_TRK = "suivi.trk";
+const $trk = document.getElementById("trk");
+const $trkEl = document.getElementById("trk-el"), $trkKm = document.getElementById("trk-km"), $trkLbl = document.getElementById("trk-lbl");
+const TRK = { VELO: { nom: "Vélo", ic: "🚲", vmax: 22 }, MARCHE: { nom: "Marche", ic: "🚶", vmax: 7 } };
+let trk = (function () { try { const t = JSON.parse(lsGet(LS_TRK) || "null"); return t && TRK[t.type] ? t : null; } catch (e) { return null; } })();
+let trkWatch = null, trkTicker = null, trkFix = null, trkMsg = "", trkSaveAt = 0, trkFollow = true, trkDel = false, trkCount = true, lockTimer = null;
+let trkSpdFb = null;
+let tMap = null, tLine = null, tDot = null, tAcc = null, tShown = -1, tCentered = false, leafletP = null;
+
+const stepsKm = n => n * STRIDE_M / 1000;
+const fmtKm = (km, d) => { const n = d == null ? 2 : d; return (isNum(km) ? km : 0).toLocaleString("fr-FR", { minimumFractionDigits: n, maximumFractionDigits: n }); };
+function hav(a, b) {
+  const r = Math.PI / 180, dLat = (b[0] - a[0]) * r, dLng = (b[1] - a[1]) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+function trkSecs(t) {
+  if (!t) return 0;
+  const now = t.end || Date.now();
+  return Math.max(0, (now - t.start - (t.paused || 0) - (t.pauseAt ? now - t.pauseAt : 0)) / 1000);
+}
+function paceTxt(secPerKm) { const p = Math.round(secPerKm); return Math.floor(p / 60) + "'" + pad2(p % 60) + " /km"; }
+function paceLabel(type, km, secs) {
+  if (!km || km < 0.05 || !secs) return "—";
+  return type === "VELO" ? fmtKm(km / (secs / 3600), 1) + " km/h" : paceTxt(secs / km);
+}
+function speedLabel(type, ms) {
+  if (ms == null || !isFinite(ms)) return "—";
+  if (type === "VELO") return fmtKm(ms * 3.6, 1) + " km/h";
+  return ms < 0.4 ? "à l'arrêt" : paceTxt(1000 / ms);
+}
+function trkPersist(force) {
+  if (!trk) { lsDel(LS_TRK); return; }
+  const n = Date.now();
+  if (force || n - trkSaveAt > 3000) { trkSaveAt = n; lsSet(LS_TRK, JSON.stringify(trk)); }
+}
+/* Points bruts : [lat, lng, t (s), 1 si début d'un nouveau tronçon] */
+function rawSegs(pts) {
+  const out = []; let cur = [];
+  (pts || []).forEach(p => { if (p[3] && cur.length) { out.push(cur); cur = []; } cur.push([p[0], p[1]]); });
+  if (cur.length) out.push(cur);
+  return out;
+}
+function simplifySegs(segs, tol) {
+  return segs.map(seg => {
+    if (seg.length < 3) return seg.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]);
+    const kx = 111320 * Math.cos(seg[0][0] * Math.PI / 180), ky = 110540;
+    const xy = seg.map(p => [p[1] * kx, p[0] * ky]);
+    const keep = new Uint8Array(seg.length); keep[0] = 1; keep[seg.length - 1] = 1;
+    const stack = [[0, seg.length - 1]];
+    while (stack.length) {
+      const ab = stack.pop(), a = ab[0], b = ab[1];
+      const ax = xy[a][0], ay = xy[a][1], dx = xy[b][0] - ax, dy = xy[b][1] - ay, l2 = dx * dx + dy * dy;
+      let md = 0, mi = -1;
+      for (let i = a + 1; i < b; i++) {
+        let t = l2 ? ((xy[i][0] - ax) * dx + (xy[i][1] - ay) * dy) / l2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const ex = ax + t * dx - xy[i][0], ey = ay + t * dy - xy[i][1], d = ex * ex + ey * ey;
+        if (d > md) { md = d; mi = i; }
+      }
+      if (mi > 0 && md > tol * tol) { keep[mi] = 1; stack.push([a, mi], [mi, b]); }
+    }
+    return seg.filter((p, i) => keep[i]).map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]);
+  });
+}
+function sorties() {
+  return Object.keys(state.docs).filter(id => id.slice(0, 2) === "g-").map(id => Object.assign({ id: id }, state.docs[id]))
+    .filter(s => s && s.date && !s.del && TRK[s.type]).sort((a, b) => (b.start || 0) - (a.start || 0));
+}
+function kmDay(k) {
+  const p = pasFor(k), fromSteps = p ? stepsKm(p.v) : 0;
+  let bike = 0, gpsWalk = 0;
+  sorties().forEach(s => { if (s.date === k) { if (s.type === "VELO") bike += s.km || 0; else gpsWalk += s.km || 0; } });
+  const walk = Math.max(fromSteps, gpsWalk);
+  return { walk: walk, walkSrc: fromSteps >= gpsWalk ? "pas" : "gps", bike: bike, total: walk + bike };
+}
+function kmWeek(mon) {
+  let walk = 0, bike = 0;
+  for (let i = 0; i < 7; i++) { const k = kmDay(ymd(addDays(mon, i))); walk += k.walk; bike += k.bike; }
+  return { walk: walk, bike: bike, total: walk + bike };
+}
+function traceSvg(segs, w, h) {
+  const all = [].concat.apply([], segs || []);
+  let s = '<svg class="trace" viewBox="0 0 ' + w + " " + h + '" aria-hidden="true">';
+  if (all.length < 2) return s + "</svg>";
+  const kx = Math.cos(all[0][0] * Math.PI / 180);
+  const xs = all.map(p => p[1] * kx), ys = all.map(p => -p[0]);
+  const x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs), y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+  const pad = 5, sc = Math.min((w - 2 * pad) / ((x1 - x0) || 1e-9), (h - 2 * pad) / ((y1 - y0) || 1e-9));
+  const ox = (w - (x1 - x0) * sc) / 2, oy = (h - (y1 - y0) * sc) / 2;
+  const P = p => [((p[1] * kx - x0) * sc + ox).toFixed(1), ((-p[0] - y0) * sc + oy).toFixed(1)];
+  let d = "";
+  segs.forEach(sg => { if (sg.length) d += "M" + sg.map(p => P(p).join(" ")).join(" L"); });
+  const a = P(all[0]), b = P(all[all.length - 1]);
+  return s + '<path d="' + d + '"/><circle cx="' + a[0] + '" cy="' + a[1] + '" r="3.2" class="tr-a"/><circle cx="' + b[0] + '" cy="' + b[1] + '" r="3.2" class="tr-b"/></svg>';
+}
+function sortieRow(s, withDel) {
+  const a = TRK[s.type], st = new Date(s.start || parseYmd(s.date));
+  let h = '<div class="sortie">' + traceSvg(s.segs, 72, 54) + '<div><b>' + a.ic + " " + esc(a.nom) + " · " + fmtKm(s.km) + " km</b>" +
+    '<span class="small muted">' + (withDel ? fdate(s.date) + " · " : "") + pad2(st.getHours()) + " h " + pad2(st.getMinutes()) + " · " + fmtClock(s.duree || 0) + " · " + esc(paceLabel(s.type, s.km, s.duree)) + "</span></div>";
+  if (withDel) h += '<button type="button" class="btn sm quiet" data-act="gdel" data-id="' + esc(s.id) + '">' + (S.confirmDel === "g:" + s.id ? "Supprimer ?" : "×") + "</button>";
+  return h + "</div>";
+}
+
+/* Démarrage, pause, fin */
+function startTrk(type) {
+  audio();
+  trk = { type: type, date: todayKey(), start: Date.now(), paused: 0, pauseAt: null, end: null, pts: [], km: 0, gaps: 0, vmax: 0, cut: false };
+  trkMsg = ""; trkFollow = true; trkDel = false; trkCount = true; tCentered = false;
+  trkPersist(true); openTrk();
+}
+function openTrk() {
+  if (!trk) return;
+  $trk.hidden = false; document.body.style.overflow = "hidden";
+  if (!trk.end) { watchGps(); keepAwake(true); }
+  renderTrk();
+  if (!trkTicker) trkTicker = setInterval(tickTrk, 1000);
+}
+function hideTrk() { destroyMap(); $trk.hidden = true; document.body.style.overflow = ""; render(); }
+function closeTrkAll() {
+  trk = null; trkPersist(true); stopGps(); destroyMap();
+  if (!run) keepAwake(false);
+  $trk.hidden = true; $trk.innerHTML = ""; document.body.style.overflow = "";
+  clearInterval(trkTicker); trkTicker = null; updateBar();
+}
+function watchGps() {
+  if (trkWatch != null) return;
+  if (!("geolocation" in navigator)) { trkMsg = "Ce navigateur ne donne pas accès au GPS."; return; }
+  trkWatch = navigator.geolocation.watchPosition(onFix, onGpsErr, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+}
+function stopGps() { if (trkWatch != null) { try { navigator.geolocation.clearWatch(trkWatch); } catch (e) {} } trkWatch = null; }
+function onGpsErr(e) {
+  trkMsg = e && e.code === 1
+    ? "Localisation refusée. Sur iPhone : Réglages → Confidentialité et sécurité → Service de localisation → Sites Safari → « Lorsque l'app est active » + « Position exacte », puis rouvre l'app."
+    : "Je cherche le signal GPS… reste à découvert quelques secondes.";
+  updateTrk();
+}
+function onFix(pos) {
+  const c = pos.coords, now = Date.now();
+  trkFix = { lat: c.latitude, lng: c.longitude, acc: c.accuracy, spd: (c.speed != null && c.speed >= 0) ? c.speed : null, t: now };
+  trkMsg = "";
+  if (!trk || trk.end || trk.pauseAt) { updateTrk(); return; }
+  if (c.accuracy > 40) { trkMsg = "Signal GPS faible (± " + Math.round(c.accuracy) + " m) : j'attends un meilleur point."; updateTrk(); return; }
+  const p = [+c.latitude.toFixed(6), +c.longitude.toFixed(6), Math.round(now / 1000)];
+  const last = trk.pts[trk.pts.length - 1];
+  if (!last || trk.cut) { if (last) p.push(1); trk.pts.push(p); trk.cut = false; trkPersist(true); updateTrk(); return; }
+  const d = hav(last, p), dt = Math.max(1, p[2] - last[2]);
+  if (d < Math.max(5, c.accuracy * 0.5)) { updateTrk(); return; }           // bruit sur place
+  if (d / dt > TRK[trk.type].vmax && dt < 120 && (trk.rej || 0) < 3) { trk.rej = (trk.rej || 0) + 1; updateTrk(); return; } // saut GPS isolé
+  trk.rej = 0;
+  if (dt > 60) trk.gaps = (trk.gaps || 0) + 1;                             // écran verrouillé : relié en ligne droite
+  if (trkFix.spd != null && c.accuracy <= 25 && trkFix.spd < TRK[trk.type].vmax) trk.vmax = Math.max(trk.vmax || 0, trkFix.spd);
+  trk.km += d / 1000;
+  trk.pts.push(p);
+  if (dt <= 60) {
+    let k = trk.pts.length - 2, dist = d;
+    while (k > 0 && p[2] - trk.pts[k][2] < 10 && !trk.pts[k][3]) { dist += hav(trk.pts[k - 1], trk.pts[k]); k--; }
+    const span = p[2] - trk.pts[k][2];
+    if (span >= 4) {
+      const v = dist / span;
+      trkSpdFb = { v: v, t: Date.now() };
+      if (v < TRK[trk.type].vmax) trk.vmax = Math.max(trk.vmax || 0, v);
+    }
+  }
+  trkPersist(); updateTrk();
+}
+function pauseTrk() {
+  if (!trk || trk.end) return;
+  if (trk.pauseAt) { trk.paused += Date.now() - trk.pauseAt; trk.pauseAt = null; trk.cut = true; }
+  else trk.pauseAt = Date.now();
+  trkPersist(true); renderTrk();
+}
+function endTrk() {
+  if (!trk) return;
+  const n = Date.now();
+  if (trk.pauseAt) { trk.paused += n - trk.pauseAt; trk.pauseAt = null; }
+  trk.end = n; stopGps();
+  if (!run) keepAwake(false);
+  trkCount = true; trkDel = false;
+  trkPersist(true); renderTrk();
+}
+function resumeTrk() {
+  if (!trk || !trk.end) return;
+  trk.paused += Date.now() - trk.end; trk.end = null; trk.cut = true;
+  trkPersist(true); openTrk();
+}
+function saveTrk() {
+  const t = trk; if (!t) return;
+  const d = new Date(t.start), id = "g-" + ymd(d) + "-" + pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds());
+  const raw = rawSegs(t.pts);
+  let tol = 3, segs = simplifySegs(raw, tol);
+  while (segs.reduce((n, s) => n + s.length, 0) > 800 && tol < 60) { tol *= 1.6; segs = simplifySegs(raw, tol); }
+  write(id, { date: t.date, type: t.type, start: t.start, end: t.end, duree: Math.round(trkSecs(t)), km: Math.round(t.km * 1000) / 1000, vmax: Math.round((t.vmax || 0) * 10) / 10, gaps: t.gaps || 0, segs: segs });
+  const count = trkCount;
+  closeTrkAll();
+  if (count) {
+    const dt = parseYmd(t.date), plan = planFor(ymd(mondayOf(dt)))[dayIdx(dt)];
+    const jid = "j-" + t.date, j = clone(D(jid));
+    j.fait = j.fait || {}; j.fait[t.type] = true;
+    if (plan.indexOf(t.type) < 0) { j.extra = Array.isArray(j.extra) ? j.extra : []; if (j.extra.indexOf(t.type) < 0) j.extra.push(t.type); }
+    write(jid, j);
+  }
+  confetti(); render();
+}
+function discardTrk() {
+  if (!trkDel) { trkDel = true; renderTrk(); return; }
+  closeTrkAll(); render();
+}
+
+/* Carte (Leaflet + OpenStreetMap, chargés seulement quand on en a besoin) */
+function loadLeaflet() {
+  if (window.L && window.L.map) return Promise.resolve(window.L);
+  if (!leafletP) leafletP = new Promise((res, rej) => {
+    const css = document.createElement("link"); css.rel = "stylesheet"; css.href = "vendor/leaflet.css"; document.head.appendChild(css);
+    const sc = document.createElement("script"); sc.src = "vendor/leaflet.js";
+    sc.onload = () => (window.L && window.L.map) ? res(window.L) : rej(new Error("leaflet"));
+    sc.onerror = () => { leafletP = null; rej(new Error("leaflet")); };
+    document.head.appendChild(sc);
+  });
+  return leafletP;
+}
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || "#2C43CF";
+function destroyMap() { if (tMap) { try { tMap.remove(); } catch (e) {} } tMap = tLine = tDot = tAcc = null; tShown = -1; tCentered = false; }
+function mountTrkMap() {
+  const el = document.getElementById("t-map"); if (!el) return;
+  loadLeaflet().then(L => {
+    if (!el.isConnected || !trk) return;
+    destroyMap();
+    tMap = L.map(el, { zoomControl: false, attributionControl: true });
+    tMap.attributionControl.setPrefix(false);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' }).addTo(tMap);
+    const col = cssVar("--accent");
+    tLine = L.polyline(rawSegs(trk.pts), { color: col, weight: 5, opacity: 0.9, lineJoin: "round", lineCap: "round" }).addTo(tMap);
+    tAcc = L.circle([0, 0], { radius: 5, color: col, weight: 1, opacity: 0.4, fillOpacity: 0.1, interactive: false });
+    tDot = L.circleMarker([0, 0], { radius: 8, color: "#fff", weight: 3, fillColor: col, fillOpacity: 1, interactive: false });
+    tMap.on("dragstart", () => { trkFollow = false; const b = document.getElementById("t-recenter"); if (b) b.hidden = false; });
+    if (trk.end && trk.pts.length > 1) { tMap.fitBounds(tLine.getBounds(), { padding: [28, 28], maxZoom: 17 }); tCentered = true; }
+    else if (trkFix) { tMap.setView([trkFix.lat, trkFix.lng], 16); tCentered = true; }
+    else if (trk.pts.length) { const l = trk.pts[trk.pts.length - 1]; tMap.setView([l[0], l[1]], 16); tCentered = true; }
+    else tMap.setView([44.8378, -0.5792], 12); // Bordeaux, le temps que le GPS réponde
+    tShown = trk.pts.length;
+    setTimeout(() => { if (tMap) tMap.invalidateSize(); }, 200);
+    updateMap();
+  }).catch(() => { el.innerHTML = '<p class="t-nomap">Carte indisponible pour l\'instant (réseau ?). Le compteur de km marche quand même.</p>'; });
+}
+function updateMap() {
+  if (!tMap || !trk) return;
+  if (trk.pts.length !== tShown) { tLine.setLatLngs(rawSegs(trk.pts)); tShown = trk.pts.length; }
+  if (trkFix && !trk.end) {
+    const ll = [trkFix.lat, trkFix.lng];
+    tDot.setLatLng(ll); tAcc.setLatLng(ll).setRadius(Math.max(3, trkFix.acc || 3));
+    if (!tMap.hasLayer(tDot)) { tAcc.addTo(tMap); tDot.addTo(tMap); }
+    if (!tCentered) { tMap.setView(ll, 16); tCentered = true; }
+    else if (trkFollow) tMap.panTo(ll, { animate: true });
+  }
+}
+
+/* Écran du traceur */
+function renderTrk() {
+  if (!trk) { $trk.hidden = true; return; }
+  const a = TRK[trk.type], ended = !!trk.end, paused = !!trk.pauseAt, secs = trkSecs(trk);
+  let h = '<div class="p-top"><button type="button" class="p-x" data-t="hide" aria-label="' + (ended ? "Fermer (la sortie reste à enregistrer)" : "Réduire, le GPS continue") + '">' + (ended ? "✕" : "↓") + "</button>" +
+    '<div class="p-title"><b>' + a.ic + " " + esc(a.nom) + (ended ? " · terminée" : paused ? " · en pause" : " · GPS actif") + '</b><span id="t-el">' + fmtClock(secs) + "</span></div>" +
+    (ended ? "" : '<span class="t-gps" id="t-gps">GPS…</span>') + "</div>";
+  h += '<div class="p-body t-body">';
+  h += '<div class="t-mapbox"><div class="t-map" id="t-map"></div>' + (ended ? "" : '<button type="button" class="btn sm t-recenter" id="t-recenter" data-t="recenter"' + (trkFollow ? " hidden" : "") + ">◎ Recentrer</button>") + "</div>";
+  h += '<div class="t-big"><b id="t-km">' + fmtKm(trk.km) + "</b><span>km</span></div>";
+  h += '<div class="t-grid"><div><b id="t-dur">' + fmtClock(secs) + "</b><span>durée</span></div>" +
+    '<div><b id="t-avg">' + paceLabel(trk.type, trk.km, secs) + "</b><span>" + (trk.type === "VELO" ? "moyenne" : "allure moy.") + "</span></div>" +
+    '<div><b id="t-now">' + (ended ? speedLabel(trk.type, trk.vmax || null) : "—") + "</b><span>" + (ended ? (trk.type === "VELO" ? "pointe" : "meilleure allure") : (trk.type === "VELO" ? "vitesse" : "allure")) + "</span></div></div>";
+  h += '<p class="t-msg" id="t-msg"></p>';
+  if (!ended) {
+    h += '<div class="p-actions t-actions"><button type="button" class="btn big ghost" data-t="pause">' + (paused ? "▶ Reprendre" : "❚❚ Pause") + '</button><button type="button" class="btn big good" data-t="end">■ Terminer</button></div>' +
+      '<div class="p-mini"><button type="button" data-t="lock">🔒 Mode poche (écran noir)</button><button type="button" data-t="hide">Réduire ›</button></div>' +
+      '<p class="small muted">Laisse l\'app ouverte : ici l\'écran ne s\'éteint pas tout seul. Sur iPhone, une app web perd le GPS si l\'écran se verrouille ; si ça arrive, je relie le trou en ligne droite quand tu reviens. Téléphone en poche ou sur le guidon : active le mode poche.</p>';
+  } else {
+    const dt = parseYmd(trk.date), plan = planFor(ymd(mondayOf(dt)))[dayIdx(dt)];
+    h += '<label class="toggle" for="t-count"><input type="checkbox" id="t-count" data-t="count"' + (trkCount ? " checked" : "") + "><span>Compter comme ta séance " + esc(a.nom.toLowerCase()) + " " + (trk.date === todayKey() ? "du jour" : "du " + fdate(trk.date)) + (plan.indexOf(trk.type) >= 0 ? " (prévue au planning)" : " (en plus du planning)") + "</span></label>";
+    if (trk.km < 0.05) h += '<p class="warnbox">Moins de 50 m enregistrés : le GPS n\'a sans doute pas capté. Tu peux quand même garder la durée.</p>';
+    h += '<div class="p-actions"><button type="button" class="btn big good" data-t="save">Enregistrer la sortie</button><button type="button" class="btn big ghost" data-t="resume">Reprendre l\'enregistrement</button></div>' +
+      '<div class="p-mini"><button type="button" data-t="discard">' + (trkDel ? "Sûr ? Touche encore pour supprimer" : "Supprimer cette sortie") + "</button></div>";
+  }
+  h += "</div>";
+  h += '<div class="t-lock" id="t-lock" hidden><b id="t-lock-km">' + fmtKm(trk.km) + ' km</b><span id="t-lock-el">' + fmtClock(secs) + "</span><p>Garde le doigt appuyé 1 seconde pour déverrouiller</p></div>";
+  $trk.innerHTML = h;
+  mountTrkMap();
+  updateTrk();
+}
+function updateTrk() {
+  updateBar();
+  if (!trk || $trk.hidden) return;
+  const secs = trkSecs(trk);
+  const set = (id, v) => { const e = document.getElementById(id); if (e && e.textContent !== v) e.textContent = v; };
+  set("t-el", fmtClock(secs)); set("t-dur", fmtClock(secs)); set("t-km", fmtKm(trk.km)); set("t-avg", paceLabel(trk.type, trk.km, secs));
+  set("t-lock-km", fmtKm(trk.km) + " km"); set("t-lock-el", fmtClock(secs));
+  let msg = "";
+  if (!trk.end) {
+    const fresh = trkFix && Date.now() - trkFix.t < 15000;
+    const sp = fresh && trkFix.spd != null ? trkFix.spd : (trkSpdFb && Date.now() - trkSpdFb.t < 15000 ? trkSpdFb.v : null);
+    set("t-now", trk.pauseAt ? "pause" : fresh ? speedLabel(trk.type, sp) : "—");
+    const g = document.getElementById("t-gps");
+    if (g) {
+      const acc = fresh ? Math.round(trkFix.acc) : null;
+      g.textContent = acc == null ? "GPS…" : "± " + acc + " m";
+      g.className = "t-gps" + (acc == null ? "" : acc <= 15 ? " ok" : acc <= 40 ? " mid" : " bad");
+    }
+    msg = trkMsg;
+    if (!msg && !trk.pts.length) msg = "Je cherche ta position… la première fois, ça peut prendre 20 à 30 secondes.";
+  }
+  if (!msg && trk.gaps) msg = trk.gaps + (trk.gaps > 1 ? " coupures" : " coupure") + " du GPS (écran verrouillé ?) " + (trk.gaps > 1 ? "reliées" : "reliée") + " en ligne droite.";
+  set("t-msg", msg);
+  updateMap();
+}
+function tickTrk() {
+  if (!trk) { clearInterval(trkTicker); trkTicker = null; updateBar(); return; }
+  updateTrk();
+}
+$trk.addEventListener("click", e => {
+  const b = e.target.closest("[data-t]");
+  if (!b || !trk) return;
+  const act = b.dataset.t;
+  if (act === "hide") hideTrk();
+  else if (act === "pause") pauseTrk();
+  else if (act === "end") endTrk();
+  else if (act === "resume") resumeTrk();
+  else if (act === "save") saveTrk();
+  else if (act === "discard") discardTrk();
+  else if (act === "recenter") { trkFollow = true; b.hidden = true; if (tMap && trkFix) tMap.setView([trkFix.lat, trkFix.lng], Math.max(tMap.getZoom() || 16, 15)); }
+  else if (act === "lock") { const l = document.getElementById("t-lock"); if (l) l.hidden = false; }
+});
+$trk.addEventListener("change", e => { if (e.target.dataset.t === "count") trkCount = e.target.checked; });
+$trk.addEventListener("pointerdown", e => {
+  const l = e.target.closest("#t-lock"); if (!l) return;
+  e.preventDefault();
+  clearTimeout(lockTimer); l.classList.add("hold");
+  lockTimer = setTimeout(() => { l.hidden = true; l.classList.remove("hold"); lockTimer = null; }, 900);
+});
+["pointerup", "pointercancel"].forEach(ev => $trk.addEventListener(ev, () => {
+  if (!lockTimer) return;
+  clearTimeout(lockTimer); lockTimer = null;
+  const l = document.getElementById("t-lock"); if (l) l.classList.remove("hold");
+}));
+
 /* ---------- Chrono de séance et minuteurs ---------- */
 const $runbar = document.getElementById("runbar"), $runTime = document.getElementById("run-time"), $runLbl = document.getElementById("run-lbl"), $runEl = document.getElementById("run-el");
 const $cd = document.getElementById("cd"), $cdTime = document.getElementById("cd-time"), $cdLbl = document.getElementById("cd-lbl"), $cdStop = document.getElementById("cd-stop");
@@ -384,7 +732,7 @@ function startRun(code, date) {
   lsSet(LS_RUN, JSON.stringify(run));
   keepAwake(true); startTicker(); render();
 }
-function stopRun() { run = null; lsDel(LS_RUN); keepAwake(false); updateBar(); }
+function stopRun() { run = null; lsDel(LS_RUN); if (!(trk && !trk.end)) keepAwake(false); updateBar(); }
 function startCountdown(sec, label, kind) {
   audio();
   cd = { end: Date.now() + sec * 1000, label: label, kind: kind };
@@ -393,8 +741,13 @@ function startCountdown(sec, label, kind) {
 function stopCountdown() { cd = null; updateBar(); }
 function startTicker() { if (!ticker) ticker = setInterval(updateBar, 250); updateBar(); }
 function updateBar() {
-  const showRun = !!run, showCd = !!cd;
-  $runbar.hidden = !(showRun || showCd);
+  const showRun = !!run, showCd = !!cd, showTrk = !!trk && $trk.hidden;
+  $runbar.hidden = !(showRun || showCd || showTrk);
+  $trkEl.hidden = !showTrk;
+  if (showTrk) {
+    $trkKm.textContent = TRK[trk.type].ic + " " + fmtKm(trk.km) + " km";
+    $trkLbl.textContent = (trk.end ? "Sortie à enregistrer" : trk.pauseAt ? "Sortie en pause" : fmtClock(trkSecs(trk)) + " · GPS actif") + " · touche pour ouvrir";
+  }
   if (showRun) {
     $runEl.hidden = false;
     $runTime.textContent = fmtClock((Date.now() - run.start) / 1000);
@@ -414,16 +767,24 @@ function updateBar() {
       $cdTime.textContent = k === "hold" ? "Terminé" : "C'est reparti";
       $cdLbl.textContent = k === "hold" ? "Souffle, puis repos" : "Série suivante";
       cd = null;
-      setTimeout(() => { if (!cd) { $cd.hidden = true; $cdStop.hidden = true; if (!run) $runbar.hidden = true; } }, 3500);
+      setTimeout(() => { if (!cd) { $cd.hidden = true; $cdStop.hidden = true; if (!run && !(trk && $trk.hidden)) $runbar.hidden = true; } }, 3500);
       return;
     }
   } else { $cd.hidden = true; $cdStop.hidden = true; }
   if (!showRun && !showCd && ticker) { clearInterval(ticker); ticker = null; }
 }
 $cdStop.addEventListener("click", stopCountdown);
-document.getElementById("runbar").addEventListener("click", e => { if (e.target.closest("#cd-stop")) return; if (play) openPlay(play.code, play.date); });
+document.getElementById("runbar").addEventListener("click", e => {
+  if (e.target.closest("#cd-stop")) return;
+  if (e.target.closest("#trk-el") || (trk && !play)) { openTrk(); return; }
+  if (play) openPlay(play.code, play.date);
+});
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") { if (run) keepAwake(true); if (token()) sync(); }
+  if (document.visibilityState === "visible") {
+    if (run || (trk && !trk.end)) keepAwake(true);
+    if (trk && !trk.end) { stopGps(); watchGps(); }
+    if (token()) sync();
+  }
 });
 
 /* ---------- Mode séance guidé (plein écran) ---------- */
@@ -778,6 +1139,15 @@ function volumeBars(data) {
   if (!data.some(d => d.reps)) return '<p class="muted small">Le volume apparaîtra après ta première séance validée.</p>';
   return '<div class="vbars">' + data.map(d => '<div class="vb"><span class="vb-n">' + (d.reps || "") + '</span><i style="height:' + Math.max(2, Math.round(d.reps / max * 100)) + '%"></i><span class="vb-l">S' + d.w + "</span></div>").join("") + "</div>";
 }
+function kmBars() {
+  const cur = Math.max(0, Math.min(12, weekNum(mondayOf(new Date()))));
+  const data = [];
+  for (let w = Math.max(0, cur - 7); w <= cur; w++) { const k = kmWeek(addDays(START, (w - 1) * 7)); data.push({ w: w, walk: k.walk, bike: k.bike, t: k.total }); }
+  if (!data.some(d => d.t)) return '<p class="muted small mt">Les km apparaîtront dès que tes pas arrivent ou après ta première sortie GPS.</p>';
+  const max = Math.max(1, ...data.map(d => d.t));
+  return '<div class="vbars">' + data.map(d => '<div class="vb"><span class="vb-n">' + (d.t ? fmtKm(d.t, d.t >= 10 ? 0 : 1) : "") + '</span><span class="vb-st" style="height:' + (d.t ? Math.max(3, Math.round(d.t / max * 100)) : 0) + '%"><i class="bk" style="flex:' + (d.t ? d.bike / d.t : 0).toFixed(4) + '"></i><i class="wk" style="flex:' + (d.t ? d.walk / d.t : 0).toFixed(4) + '"></i></span><span class="vb-l">S' + d.w + "</span></div>").join("") +
+    '</div><div class="heat-leg"><span><i class="lg wk"></i>à pied</span><span><i class="lg bk"></i>à vélo</span></div>';
+}
 const MOTIV = [
   "40 minutes de séance, c'est moins qu'un scroll TikTok qui part en vrille.",
   "Pose Insta, prends le tapis : les pecs ne se dessinent pas en regardant ceux des autres.",
@@ -880,8 +1250,13 @@ function actCard(code, t, j, isExtra) {
   let h = '<div class="card ' + (done ? "isdone" : "main") + '">';
   h += '<div class="between"><div><h3>' + esc(a.nom) + (a.sous ? ' <span class="sous">· ' + esc(a.sous) + "</span>" : "") + '</h3><p class="small muted">' + esc(a.lieu) + " · " + esc(a.duree) + "</p></div>" + (done ? '<span class="pill good">Fait</span>' : (isExtra ? '<span class="pill">En plus</span>' : "")) + "</div>";
   if (a.type === "muscu") { if (open) h += '<div class="mt">' + sessionBody(code, t) + "</div>"; }
-  else if (code === "VELO") h += '<p class="small mt">Les jours de parc, y aller à vélo compte déjà.</p>';
+  else {
+    const ss = sorties().filter(s => s.date === t && s.type === code);
+    if (ss.length) h += '<div class="mt">' + ss.map(s => sortieRow(s)).join("") + "</div>";
+    if (code === "VELO") h += '<p class="small mt">Les jours de parc, y aller à vélo compte déjà. Lance le GPS : la distance et le tracé s\'enregistrent tout seuls.</p>';
+  }
   h += '<div class="row mt">';
+  if (a.type === "cardio" && TRK[code]) h += (trk ? '<button type="button" class="btn" data-act="gpsopen">📍 Sortie en cours · ' + fmtKm(trk.km) + " km</button>" : '<button type="button" class="btn' + (done ? " ghost" : "") + '" data-act="gps" data-type="' + code + '">📍 ' + (done ? "Nouvelle sortie GPS" : "Lancer le GPS") + "</button>");
   h += '<button type="button" class="btn ' + (done ? "quiet" : "good") + '" data-act="done" data-code="' + code + '" data-date="' + t + '">' + (done ? "Annuler « fait »" : (a.type === "muscu" ? "Séance terminée" : "C'est fait")) + "</button>";
   if (a.type === "muscu") h += '<button type="button" class="btn ghost" data-act="open" data-key="' + key + '" data-def="' + (defOpen ? 1 : 0) + '">' + (open ? "Replier" : "Voir la séance") + "</button>";
   if (isExtra && !done) h += '<button type="button" class="btn quiet" data-act="unextra" data-code="' + code + '" data-date="' + t + '">Retirer</button>';
@@ -892,13 +1267,25 @@ function stepsCard(t) {
   const p = pasFor(t);
   const j = D("j-" + t) || {};
   const pct = p ? Math.min(100, Math.round(p.v / STEP_GOAL * 100)) : 0;
-  let h = '<div class="card"><div class="between"><h3>Pas du jour</h3><span class="small muted">objectif 8 000</span></div>';
-  h += '<div class="row mt" style="align-items:baseline"><span class="bigsteps">' + (p ? fmt(p.v, 0) : "—") + "</span>" +
-    (p ? '<span class="small muted">' + (p.auto ? "depuis Santé" + (p.at ? " à " + hhmm(p.at) : "") : "saisis à la main") + "</span>" : "") + "</div>";
+  const km = kmDay(t);
+  let h = '<div class="card"><div class="between"><h3>Pas et km du jour</h3><span class="small muted">objectif 8 000 pas</span></div>';
+  h += '<div class="row mt" style="align-items:baseline;gap:6px 8px"><span class="bigsteps">' + (p ? fmt(p.v, 0) : "—") + '</span><span class="small muted">pas</span>' +
+    (km.total > 0 ? '<span class="bigkm">' + fmtKm(km.total, 1) + '</span><span class="small muted">km</span>' : "") + "</div>";
   h += '<div class="bar mt' + (pct >= 100 ? " ok" : "") + '"><i style="width:' + pct + '%"></i></div>';
+  const parts = [];
+  if (km.walk > 0) parts.push("🚶 " + fmtKm(km.walk, 1) + " km à pied" + (km.walkSrc === "pas" ? " (d'après tes pas)" : " (GPS)"));
+  if (km.bike > 0) parts.push("🚲 " + fmtKm(km.bike, 1) + " km à vélo");
+  if (parts.length) h += '<p class="small mt">' + parts.join(" · ") + "</p>";
   if (p && p.v < STEP_GOAL) h += '<p class="small mt">Il t\'en manque ' + fmt(STEP_GOAL - p.v, 0) + ", soit environ " + Math.max(5, Math.round((STEP_GOAL - p.v) / 100 / 5) * 5) + " min de marche.</p>";
-  h += '<div class="row mt"><a class="btn sm" href="shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT_NAME) + '" data-act="health">Mettre à jour depuis Santé</a></div>';
-  h += '<details class="warm mt"><summary>Saisir à la main</summary><label class="f mt" for="pas-' + t + '" style="max-width:200px">Nombre de pas<input id="pas-' + t + '" type="number" inputmode="numeric" min="0" step="100" value="' + (isNum(j.pas) ? j.pas : "") + '" data-act="pas" data-date="' + t + '"></label></details>';
+  h += '<p class="small muted mt">' + (p && p.auto ? "Reçus de Santé à " + hhmm(p.at) + ", sans rien toucher." : p ? "Saisis à la main." : "Pas encore reçus aujourd'hui.") +
+    (p && p.auto ? "" : ' <a href="#plus">Les recevoir tout seuls</a>') + "</p>";
+  const ss = sorties().filter(s => s.date === t);
+  if (ss.length) h += '<div class="mt">' + ss.map(s => sortieRow(s)).join("") + "</div>";
+  h += '<div class="row mt">' + (trk
+    ? '<button type="button" class="btn sm" data-act="gpsopen">📍 Sortie en cours · ' + fmtKm(trk.km) + " km</button>"
+    : '<button type="button" class="btn sm" data-act="gps" data-type="MARCHE">🚶 GPS marche</button><button type="button" class="btn sm" data-act="gps" data-type="VELO">🚲 GPS vélo</button>') +
+    '<a class="btn sm ghost" href="shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT_NAME) + '" data-act="health">Mettre à jour les pas</a></div>';
+  h += '<details class="warm mt"><summary>Saisir les pas à la main</summary><label class="f mt" for="pas-' + t + '" style="max-width:200px">Nombre de pas<input id="pas-' + t + '" type="number" inputmode="numeric" min="0" step="100" value="' + (isNum(j.pas) ? j.pas : "") + '" data-act="pas" data-date="' + t + '"></label></details>';
   return h + "</div>";
 }
 function weekStrip(mon, plan, tk) {
@@ -1031,7 +1418,8 @@ function vWeek() {
     h += '<div class="tiles"><div class="card tile"><div class="big">' + st.dm + "/" + st.pm + '</div><div class="lbl">Muscu faite</div></div>' +
       '<div class="card tile"><div class="big">' + st.dc + "/" + st.pc + '</div><div class="lbl">Cardio fait</div></div>' +
       '<div class="card tile"><div class="big">' + (avg == null ? "—" : fmt(avg, 0)) + '</div><div class="lbl">Pas / jour (moy.)</div></div>' +
-      '<div class="card tile"><div class="big">' + (st.pm ? Math.round(st.dm / st.pm * 100) + " %" : "—") + '</div><div class="lbl">Régularité</div></div></div>';
+      '<div class="card tile"><div class="big">' + (st.pm ? Math.round(st.dm / st.pm * 100) + " %" : "—") + '</div><div class="lbl">Régularité</div></div>' +
+      (function () { const k = kmWeek(mon); return '<div class="card tile"><div class="big">' + fmtKm(k.walk, 1) + '</div><div class="lbl">Km à pied</div></div><div class="card tile"><div class="big">' + fmtKm(k.bike, 1) + '</div><div class="lbl">Km à vélo (GPS)</div></div>'; })() + "</div>";
     const wd = D("w-" + mk) || {};
     h += '<div class="card mt stack"><label class="f" for="som-' + mk + '" style="max-width:220px">Sommeil moyen (heures par nuit)<input id="som-' + mk + '" type="number" inputmode="decimal" min="0" max="14" step="0.5" value="' + (isNum(wd.sommeil) ? wd.sommeil : "") + '" data-act="wfield" data-f="sommeil" data-mk="' + mk + '"></label>' +
       '<div><div class="small muted" style="font-weight:700;margin-bottom:6px">Ressenti de la semaine (1 = dur, 5 = au top)</div><div class="rating" role="group" aria-label="Ressenti">' +
@@ -1152,7 +1540,7 @@ function vProgress() {
     objRow("Pompes d'affilée", p0, pc, 45, "") +
     objRow("Pompes archer (par côté)", first("archer"), last("archer"), 8, "") +
     objRow("Tractions pronation", tr0, last("tractions"), isNum(tr0) ? tr0 + 5 : null, "", isNum(tr0) ? null : "départ + 5") +
-    objRow("Dips aux barres", first("dips"), last("dips"), 15, "") +
+    objRow("Chin-ups (paumes vers toi)", first("chinups"), last("chinups"), isNum(first("chinups")) ? first("chinups") + 5 : null, "", isNum(first("chinups")) ? null : "départ + 5") +
     objRow("Tour de bras contracté", br0, last("bras"), isNum(br0) ? br0 + 1 : null, " cm", isNum(br0) ? null : "départ + 1 cm") +
     objRow("Tour de poitrine", po0, last("poitrine"), isNum(po0) ? po0 + 2 : null, " cm", isNum(po0) ? null : "départ + 2 cm") +
     objRow("Poids (prise de muscle)", b0 && isNum(b0.poids) ? b0.poids : 61, latestWeight(), 63, " kg") +
@@ -1165,11 +1553,20 @@ function vProgress() {
   const rec = records();
   h += '<h2>Tes records</h2>' + (rec.length ? '<div class="card scroll"><table class="tbl"><thead><tr><th>Exercice</th><th>Meilleure série</th><th>Le</th></tr></thead><tbody>' + rec.map(r => '<tr><td>' + esc(r.nom) + '</td><td class="num"><b>' + r.best + '</b> ' + esc(r.u) + '</td><td class="num">' + fdate(r.date) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="card"><p class="muted">Tes records apparaîtront après tes premières séances guidées.</p></div>');
   h += '<h2>Volume par semaine</h2><div class="card"><p class="small muted">Répétitions totales des séances A, B et C.</p>' + volumeBars(weekVolume()) + '</div>';
+  const kw = kmWeek(mondayOf(now)), ss = sorties();
+  const bikeTot = ss.filter(x => x.type === "VELO").reduce((a, x) => a + (x.km || 0), 0);
+  h += '<h2>Km parcourus</h2><div class="tiles"><div class="card tile"><div class="big">' + fmtKm(kw.total, 1) + '</div><div class="lbl">km cette semaine</div></div>' +
+    '<div class="card tile"><div class="big">' + fmtKm(kw.walk, 1) + '</div><div class="lbl">à pied · semaine</div></div>' +
+    '<div class="card tile"><div class="big">' + fmtKm(kw.bike, 1) + '</div><div class="lbl">à vélo · semaine</div></div>' +
+    '<div class="card tile"><div class="big">' + fmtKm(bikeTot, bikeTot >= 100 ? 0 : 1) + '</div><div class="lbl">km vélo au total</div></div></div>';
+  h += '<div class="card mt"><p class="small muted">À pied : d\'après tes pas (ou le GPS si la sortie fait plus). À vélo : sorties GPS.</p>' + kmBars() + "</div>";
+  h += ss.length ? '<div class="card mt"><h3>Tes sorties GPS</h3><div class="mt">' + ss.slice(0, 10).map(x => sortieRow(x, true)).join("") + "</div></div>"
+    : '<div class="card mt"><p class="muted">Ta prochaine sortie vélo ou marche : lance le GPS depuis Aujourd\'hui. Distance, durée, vitesse et tracé s\'enregistrent ici.</p></div>';
   const metrics = [["pompes", "Pompes max", ""], ["pas", "Pas (4 sem.)", ""], ["poids", "Poids", " kg"], ["mmKg", "Muscle", " kg"], ["mg", "Masse grasse", " %"], ["bras", "Tour de bras", " cm"]];
   const cur = metrics.find(m => m[0] === S.metric) || metrics[0];
   h += '<h2>Courbe</h2><div class="card chart"><div class="row" role="group" aria-label="Mesure affichée">' + metrics.map(m => '<button type="button" class="chip' + (m[0] === cur[0] ? " sel" : "") + '" data-act="metric" data-m="' + m[0] + '" aria-pressed="' + (m[0] === cur[0]) + '">' + m[1] + "</button>").join("") + '</div><div class="mt">' + chartSvg(metricSeries(cur[0]), cur[2]) + "</div></div>";
-  h += "<h2>Ajouter un test</h2>" + formHtml("test", [["date", "Date", "date"], ["pompes", "Pompes max", "number"], ["archer", "Archer / côté", "number"], ["planche", "Planche (s)", "number"], ["tractions", "Tractions", "number"], ["dips", "Dips", "number"], ["bras", "Tour de bras (cm)", "number"], ["poitrine", "Tour de poitrine (cm)", "number"], ["poids", "Poids (kg)", "number"]], "Enregistrer le test");
-  if (tests.length) h += histTable("tests", [["pompes", "Pompes"], ["archer", "Archer"], ["planche", "Planche s"], ["tractions", "Tract."], ["dips", "Dips"], ["bras", "Bras cm"], ["poitrine", "Poitr. cm"], ["poids", "Poids"]]);
+  h += "<h2>Ajouter un test</h2>" + formHtml("test", [["date", "Date", "date"], ["pompes", "Pompes max", "number"], ["archer", "Archer / côté", "number"], ["planche", "Planche (s)", "number"], ["tractions", "Tractions", "number"], ["chinups", "Chin-ups", "number"], ["australien", "Rowing australien", "number"], ["genoux", "Relevés de genoux", "number"], ["dips", "Dips", "number"], ["bras", "Tour de bras (cm)", "number"], ["poitrine", "Tour de poitrine (cm)", "number"], ["poids", "Poids (kg)", "number"]], "Enregistrer le test");
+  if (tests.length) h += histTable("tests", [["pompes", "Pompes"], ["archer", "Archer"], ["planche", "Planche s"], ["tractions", "Tract."], ["chinups", "Chin-ups"], ["australien", "Austral."], ["genoux", "Genoux"], ["dips", "Dips"], ["bras", "Bras cm"], ["poitrine", "Poitr. cm"], ["poids", "Poids"]]);
   h += '<h2>Bilans Biody</h2><div class="card stack"><p><b>Ta fiche du 17/11 :</b> muscle squelettique 29,1 kg (référence 28,2 kg), masse grasse 7,2 kg soit 11,7 % (référence 14,9 %), indice de masse maigre 18,6 kg/m² (référence 17), eau totale 38,7 L (référence 39,5 L), angle de phase 7,8°. Tu es déjà plus musclé et plus sec que la référence : l\'objectif est de prendre du muscle, pas de perdre du gras.</p><p>Prochains : ' + BILAN_DATES.map(d => fdate(d) + (d.slice(0, 4) === "2027" ? " 2027" : "")).join(", ") + '.</p><p class="small muted mt">Pour comparer : même créneau qu\'au départ (vers 12 h 50), avant le repas, vessie vide, pas de sport dans les 12 h avant, pas d\'alcool la veille.</p></div>';
   h += formHtml("bilan", [["date", "Date", "date"], ["poids", "Poids (kg)", "number"], ["mg", "Masse grasse (%)", "number"], ["mm", "Masse musc. (%)", "number"], ["mmKg", "Muscle squelettique (kg)", "number"], ["mgKg", "Masse grasse (kg)", "number"], ["eau", "Eau totale (L)", "number"], ["hydra", "Hydratation (%)", "number"], ["angle", "Angle de phase (°)", "number"]], "Enregistrer le bilan");
   if (bil.length) h += histTable("bilans", [["poids", "Poids"], ["mmKg", "Muscle kg"], ["mg", "Gras %"], ["mgKg", "Gras kg"], ["eau", "Eau L"], ["angle", "Angle °"]]);
@@ -1217,15 +1614,25 @@ function vPlus() {
     '<label class="toggle" for="n-biody"><input type="checkbox" id="n-biody" data-act="notif" data-k="biody"' + (n.biody ? " checked" : "") + "><span>Veille de bilan Biody (20 h)</span></label></div>";
   h += '<p class="small muted">Les rappels partent de ton dépôt privé (GitHub Actions), à quelques minutes près.</p></div>';
 
-  h += "<h2>Pas depuis Santé</h2><div class=\"card stack\"><p>Un raccourci iOS lit tes pas dans l'app Santé et les envoie à l'app. À créer une fois dans l'app <strong>Raccourcis</strong> :</p>" +
-    '<ol class="rules small"><li>Nouveau raccourci, nommé exactement <code>' + SHORTCUT_NAME + "</code>.</li>" +
+  const sc = encodeURIComponent(SHORTCUT_NAME);
+  h += "<h2>Pas automatiques</h2><div class=\"card stack\"><p>Ton raccourci <code>" + SHORTCUT_NAME + "</code> lit tes pas dans Santé et les envoie à l'app. Pour qu'il tourne <strong>tout seul, sans rien toucher</strong>, crée ces automatisations une seule fois (2 minutes) :</p>" +
+    '<ol class="rules small"><li>App <strong>Raccourcis</strong> → onglet <strong>Automatisation</strong> → <strong>+</strong>.</li>' +
+    "<li><strong>Heure de la journée</strong> → <strong>12 h 30</strong> → <strong>Quotidien</strong> → coche <strong>Exécuter immédiatement</strong> et désactive <em>M'avertir lors de l'exécution</em> → Suivant.</li>" +
+    "<li>Choisis l'action <strong>Exécuter le raccourci</strong> → <code>" + SHORTCUT_NAME + "</code> → OK.</li>" +
+    "<li>Refais pareil pour <strong>18 h 30</strong> et <strong>21 h 45</strong>. Supprime l'ancienne automatisation de 19 h 45 si tu l'avais créée.</li></ol>" +
+    '<p class="small muted">Pourquoi trois horaires : iOS bloque la lecture de Santé quand l\'iPhone est verrouillé. Si un horaire tombe pendant que le téléphone dort, le suivant rattrape. Le total du jour est remplacé à chaque envoi : rien ne compte en double.</p>' +
+    '<p class="small muted">Les km à pied viennent de tes pas (1 pas ≈ ' + fmt(STRIDE_M * 100, 0) + ' cm). Pour le vélo, lance le GPS.</p>' +
+    '<div class="row"><a class="btn sm" href="shortcuts://run-shortcut?name=' + sc + '" data-act="health">Tester le raccourci</a></div>' +
+    '<details class="warm"><summary>Recréer le raccourci « ' + SHORTCUT_NAME + ' » si tu l\'as supprimé</summary><ol class="rules small"><li>Nouveau raccourci, nommé exactement <code>' + SHORTCUT_NAME + "</code>.</li>" +
     "<li>Action <strong>Rechercher des échantillons de santé</strong> : Type = <em>Pas</em>, Date de début = <em>Aujourd'hui</em>.</li>" +
     "<li>Action <strong>Calculer les statistiques</strong> : <em>Somme</em> des échantillons de santé.</li>" +
     "<li>Action <strong>Formater la date</strong> : Date actuelle, format personnalisé <code>yyyy-MM-dd</code>.</li>" +
-    "<li>Action <strong>Obtenir le contenu de l'URL</strong> : <code>https://api.github.com/repos/" + DATA_REPO + "/dispatches</code>, méthode <em>POST</em>.<br>En-têtes : <code>Authorization</code> = <code>Bearer</code> + espace + ton token ; <code>Accept</code> = <code>application/vnd.github+json</code>.<br>Corps JSON : <code>event_type</code> (texte) = <code>pas</code> ; <code>client_payload</code> (dictionnaire) avec <code>date</code> (texte) = la date formatée et <code>pas</code> (nombre) = les statistiques.</li>" +
-    "<li>Onglet <strong>Automatisation</strong> → Heure de la journée → 19 h 45, chaque jour → <strong>Exécuter immédiatement</strong> → exécuter <code>" + SHORTCUT_NAME + "</code>.</li></ol>" +
-    '<p class="small muted">Si ton iPhone est verrouillé à 19 h 45, iOS peut bloquer la lecture de Santé. Dans ce cas, appuie sur « Mettre à jour depuis Santé » dans Aujourd\'hui.</p>' +
-    '<div class="row"><a class="btn sm" href="shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT_NAME) + '" data-act="health">Tester le raccourci</a></div></div>';
+    "<li>Action <strong>Obtenir le contenu de l'URL</strong> : <code>https://api.github.com/repos/" + DATA_REPO + "/dispatches</code>, méthode <em>POST</em>.<br>En-têtes : <code>Authorization</code> = <code>Bearer</code> + espace + ton token ; <code>Accept</code> = <code>application/vnd.github+json</code>.<br>Corps JSON : <code>event_type</code> (texte) = <code>pas</code> ; <code>client_payload</code> (dictionnaire) avec <code>date</code> (texte) = la date formatée et <code>pas</code> (nombre) = les statistiques.</li></ol></details></div>";
+
+  h += '<h2>Traceur GPS</h2><div class="card stack"><p>Pour le vélo et la marche : <strong>Aujourd\'hui → 🚲 GPS vélo</strong> ou <strong>🚶 GPS marche</strong>. Carte en direct, km, durée, vitesse ; à la fin, la sortie s\'enregistre et coche ta séance.</p>' +
+    '<ul class="plain small"><li>La première fois, autorise la localisation. Si tu as refusé : Réglages → Confidentialité et sécurité → Service de localisation → Sites Safari → « Lorsque l\'app est active » et « Position exacte ».</li>' +
+    "<li>Garde l'app ouverte pendant la sortie : l'écran reste allumé. En poche ou sur le guidon, touche <strong>Mode poche</strong> (écran noir, appui long pour revenir).</li>" +
+    "<li>Si l'écran se verrouille quand même, le GPS s'arrête (règle d'iOS pour les apps web) : en revenant, le trou est relié en ligne droite.</li></ul></div>";
 
   const wt = latestWeight();
   const lo = isNum(wt) ? Math.round(wt * 1.8 / 5) * 5 : 110, hi = isNum(wt) ? Math.round(wt * 2.1 / 5) * 5 : 130;
@@ -1323,6 +1730,13 @@ $app.addEventListener("click", e => {
     }
     case "start": startRun(ds.code, ds.date); break;
     case "play": openPlay(ds.code, ds.date); break;
+    case "gps": if (trk) openTrk(); else startTrk(ds.type); break;
+    case "gpsopen": openTrk(); break;
+    case "gdel": {
+      const ck = "g:" + ds.id;
+      if (S.confirmDel !== ck) { S.confirmDel = ck; render(); break; }
+      const g = D(ds.id) || {}; write(ds.id, { del: true, date: g.date }); S.confirmDel = null; render(); break;
+    }
     case "weigh": {
       const v = toNum((document.getElementById("quick-w") || {}).value);
       if (!isNum(v) || v < 30 || v > 200) { S.formMsg.weigh = "Entre ton poids en kg, par exemple 61,4."; render(); break; }
@@ -1419,7 +1833,7 @@ $app.addEventListener("focusout", () => {
 $app.addEventListener("submit", e => {
   e.preventDefault();
   const f = e.target, kind = f.dataset.form;
-  const keys = kind === "test" ? ["pompes", "archer", "planche", "tractions", "dips", "bras", "poitrine", "poids"] : ["poids", "mg", "mm", "mmKg", "mgKg", "eau", "hydra", "angle"];
+  const keys = kind === "test" ? ["pompes", "archer", "planche", "tractions", "chinups", "australien", "genoux", "dips", "bras", "poitrine", "poids"] : ["poids", "mg", "mm", "mmKg", "mgKg", "eau", "hydra", "angle"];
   const it = { date: (f.elements.date && f.elements.date.value) || todayKey() };
   keys.forEach(k => { const v = toNum(f.elements[k] && f.elements[k].value); if (isNum(v)) it[k] = v; });
   if (Object.keys(it).length < 2) { S.formMsg[kind] = "Remplis au moins une mesure."; render(); return; }
@@ -1471,5 +1885,6 @@ renderStatus();
 route();
 if (run) { keepAwake(true); startTicker(); }
 if (play && play.open) { renderPlay(); startPlayTicker(); }
+if (trk) openTrk();
 if (token()) sync();
 })();

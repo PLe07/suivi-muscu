@@ -48,3 +48,17 @@ Lieu : « in a bright, tidy bedroom with a wooden floor and an exercise mat » p
 | `superman.mp4` | Superman | In a bedroom. Superman exercise lying face down on a mat: arms and legs lift together, hold two seconds at the top, then lower. |
 
 La vidéo `planche.mp4` sert à la fois pour la séance C et la séance Gainage.
+
+## État au 23/11/2026 : les 21 vidéos sont en place
+
+| Source | Vidéos |
+| --- | --- |
+| Gemini (réalistes) | pompes pieds surélevés, pompes en déficit, dips sur chaise, pompes diamant, pike push-ups, pompes classiques, pompes archer, dips aux barres, planche, tractions pronation, rowing australien, relevés de genoux suspendu, pompes lestées, rowing sous une table, curl au sac à dos, extensions triceps |
+| Lumina (réaliste, 4 s, logo en bas à droite) | gainage latéral |
+| Illustrations animées faites par Claude | chin-ups, hollow hold, relevés de jambes allongé, superman |
+
+À refaire si tu veux mieux (même nom de fichier, ça remplace) : les 4 illustrations par des vidéos réalistes, `curl-sac.mp4` (cadrage avec une porte au premier plan) et `extensions-triceps.mp4` (ressemble à des pompes inclinées : le front doit descendre sous le niveau des mains).
+
+La séance B utilise `dips-chaise.mp4` pour les dips sur un banc (pas de barres parallèles au parc).
+
+Les vidéos sont réencodées en H.264 sans son (environ 200 à 600 Ko chacune) pour se charger vite au parc en 4G.

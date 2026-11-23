@@ -288,6 +288,48 @@ details.card summary{cursor:pointer}
 .confetti i{position:absolute;top:-12px;width:9px;height:14px;border-radius:2px;animation:fall 2.6s ease-in forwards}
 @keyframes fall{to{transform:translateY(105vh) rotate(540deg);opacity:.7}}
 .runbar .in{cursor:pointer}
+/* Traceur GPS */
+.trk{z-index:31}
+.t-body{gap:12px}
+.t-mapbox{position:relative;z-index:0;isolation:isolate;border-radius:16px;overflow:hidden;border:1px solid var(--line);background:var(--surface)}
+.t-map{height:min(40vh,360px);width:100%;background:var(--accent-soft)}
+.t-nomap{display:grid;place-items:center;height:100%;margin:0;padding:16px;text-align:center;color:var(--muted);font-size:14px}
+.t-recenter{position:absolute;right:10px;bottom:10px;z-index:500;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+.t-big{display:flex;align-items:baseline;justify-content:center;gap:8px;margin-top:2px}
+.t-big b{font-family:var(--font-display);font-size:80px;line-height:.95;font-variant-numeric:tabular-nums}
+.t-big span{font-family:var(--font-display);font-size:26px;font-weight:700;color:var(--muted)}
+.t-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.t-grid div{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:10px 4px;text-align:center;display:grid;gap:3px}
+.t-grid b{font-family:var(--font-display);font-size:23px;line-height:1.05;font-variant-numeric:tabular-nums}
+.t-grid span{font-size:12px;color:var(--muted);font-weight:700}
+.t-msg{text-align:center;font-size:14px;color:var(--warn);font-weight:600}
+.t-msg:empty{display:none}
+.t-gps{font-size:12.5px;font-weight:700;padding:4px 10px;border-radius:999px;background:var(--surface);border:1px solid var(--line);color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.t-gps.ok{color:var(--good);border-color:var(--good)}
+.t-gps.mid{color:var(--warn);border-color:var(--warn)}
+.t-gps.bad{color:var(--crit);border-color:var(--crit)}
+.t-actions{grid-template-columns:1fr 1fr}
+.t-lock{position:fixed;inset:0;z-index:60;background:#000;color:#8a90a0;display:grid;place-content:center;justify-items:center;gap:6px;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;text-align:center;padding:24px}
+.t-lock[hidden]{display:none}
+.t-lock b{font-family:var(--font-display);font-size:68px;line-height:1;color:#c9ced8;font-variant-numeric:tabular-nums}
+.t-lock span{font-family:var(--font-display);font-size:30px;font-variant-numeric:tabular-nums}
+.t-lock p{font-size:14px;margin-top:28px;color:#5d6373;transition:color .9s}
+.t-lock.hold p{color:#e7eaf4}
+.bigkm{font-family:var(--font-display);font-size:30px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;margin-left:10px}
+.sortie{display:flex;gap:12px;align-items:center;padding:9px 0}
+.sortie + .sortie{border-top:1px solid var(--line)}
+.sortie > div{flex:1;display:grid;gap:1px;min-width:0}
+.trace{width:72px;height:54px;flex:none;background:var(--bg);border-radius:9px;border:1px solid var(--line)}
+.trace path{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}
+.trace .tr-a{fill:var(--good)}
+.trace .tr-b{fill:var(--accent)}
+.vb-st{align-self:end;width:70%;display:flex;flex-direction:column;border-radius:6px 6px 2px 2px;overflow:hidden}
+.vb-st i{display:block;width:100%;min-height:0;border-radius:0}
+.vb-st i.bk,.lg.bk{background:var(--accent)}
+.vb-st i.wk,.lg.wk{background:var(--good)}
+.lg{display:inline-block;width:12px;height:12px;border-radius:3px}
+.runbar #trk-el b{font-size:22px}
+.leaflet-container{font-family:var(--font-body)}
 @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -303,9 +345,11 @@ details.card summary{cursor:pointer}
 </header>
 <main class="wrap" id="app"></main>
 <div class="play" id="play" hidden role="dialog" aria-label="Séance guidée"></div>
+<div class="play trk" id="trk" hidden role="dialog" aria-label="Traceur GPS"></div>
 <div class="runbar" id="runbar" hidden>
   <div class="in">
     <div class="t" id="run-el"><b id="run-time">0:00</b><span id="run-lbl">Séance</span></div>
+    <div class="t" id="trk-el" hidden><b id="trk-km">0,00 km</b><span id="trk-lbl">Sortie GPS</span></div>
     <div class="t cd" id="cd" hidden><b id="cd-time">1:30</b><span id="cd-lbl">Repos</span></div>
     <button type="button" class="btn sm" id="cd-stop" hidden>Stop</button>
   </div>
